@@ -55,19 +55,8 @@ function autoRegister(cwd) {
   // Immediate children of the base only — not the base itself, not deeper.
   if (path.dirname(folder) !== base) return null;
 
-  const taken = new Set(
-    all('SELECT name FROM participants').map((r) => r.name.toLowerCase())
-  );
-  let name = path.basename(path.resolve(cwd));
-  if (taken.has(name.toLowerCase())) {
-    // Same folder name in a different location — keep both distinguishable.
-    let i = 2;
-    while (taken.has(`${name}-${i}`.toLowerCase())) i++;
-    name = `${name}-${i}`;
-  }
-
-  const res = core.register({ name, cwd });
-  return res.status === 'ok' ? res.name : null;
+  const res = core.registerFolder({ folder: cwd });
+  return res.name || null;
 }
 
 function render(name, res) {

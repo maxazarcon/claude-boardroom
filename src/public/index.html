@@ -105,30 +105,28 @@
     </section>
 
     <section class="pane">
-      <details id="folders-details">
-        <summary>Claude Code folders</summary>
+      <details id="setup-details" open>
+        <summary>Setup &amp; projects</summary>
         <div class="stack" style="margin-top:12px">
-          <div class="row">
-            <input id="base" placeholder="C:\Users\you\Projects — base &quot;Claude Projects&quot; folder">
-            <button id="browse" style="display:none">Browse…</button>
-            <button id="scan">Scan</button>
-          </div>
-          <div class="small muted">
-            Scans the immediate subfolders and flags the ones that look Claude-touched
-            (<code>.claude/</code>, <code>CLAUDE.md</code>, <code>.mcp.json</code>,
-            <code>.claude/settings.json</code>). The UI cannot connect a session on its own —
-            a connection is only ever initiated from the session's side. All it can do is
-            write the config for you.
-          </div>
-          <div id="folderlist"></div>
-        </div>
-      </details>
-    </section>
+          <div id="wiring"></div>
 
-    <section class="pane">
-      <details id="setup-details">
-        <summary>Connecting sessions &amp; the auto-poll hook</summary>
-        <div class="stack" style="margin-top:12px" id="setup"></div>
+          <div>
+            <h3>Projects folder</h3>
+            <div class="row">
+              <input id="base" placeholder="C:\Users\you\Projects — your Claude projects folder">
+              <button id="browse" style="display:none">Browse…</button>
+              <button id="usefolder" class="primary">Use this folder</button>
+            </div>
+            <div class="small muted" style="margin-top:6px" id="autoreg"></div>
+          </div>
+
+          <div id="folderlist"></div>
+
+          <details id="manual-details">
+            <summary>Manual config, for another machine</summary>
+            <div class="stack" style="margin-top:12px" id="setup"></div>
+          </details>
+        </div>
       </details>
     </section>
   </div>
@@ -142,6 +140,9 @@ let roomData = null;
 let order = [];
 let setup = null;
 let appInfo = null;
+let wiring = null;
+let wiringSig = null;
+let folders = null;
 let turnResult = null;
 let busy = false;
 
@@ -156,10 +157,56 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const time = (iso) => { try { return new Date(iso).toLocaleTimeString(); } catch { return iso; } };
 
+/* ------------------------------------------- typing through a polling render */
+// The panes are rebuilt wholesale on a timer. Left alone that wipes whatever
+// you are typing and drops focus mid-word every couple of seconds, so:
+//   1. a render that would change nothing is skipped entirely, and
+//   2. a render that does happen carries field contents and the caret across.
+
+const drafts = {};
+
+function paint(el, html) {
+  const active = document.activeElement;
+  const focus =
+    active && active.id && /^(INPUT|TEXTAREA)$/.test(active.tagName)
+      ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
+      : null;
+
+  el.innerHTML = html;
+
+  el.querySelectorAll('input, textarea').forEach((f) => {
+    if (!f.id) return;
+    if (drafts[f.id] !== undefined) f.value = drafts[f.id];
+    f.addEventListener('input', () => { drafts[f.id] = f.value; });
+  });
+
+  if (focus) {
+    const again = document.getElementById(focus.id);
+    if (again) {
+      again.focus();
+      try { again.setSelectionRange(focus.start, focus.end); } catch { /* not a text field */ }
+    }
+  }
+}
+
+// Clearing a field after sending has to clear its draft too, or the next
+// render helpfully puts the text back.
+function clearField(id) {
+  delete drafts[id];
+  const el = $(id);
+  if (el) el.value = '';
+}
+
 /* ------------------------------------------------------------------ rendering */
 
+let sideSig = null;
+
 function renderSide() {
-  $('rooms').innerHTML = state.rooms.length
+  const sig = JSON.stringify([state.rooms, state.participants, selectedRoom]);
+  if (sig === sideSig) return;
+  sideSig = sig;
+
+  paint($('rooms'), state.rooms.length
     ? state.rooms.map((r) => `
         <li class="item ${r.name === selectedRoom ? 'active' : ''}">
           <div class="roomrow" data-room="${esc(r.name)}">
@@ -167,13 +214,13 @@ function renderSide() {
             <span class="tag">${r.participants} here</span>
           </div>
         </li>`).join('')
-    : '<li class="empty">No rooms yet.</li>';
+    : '<li class="empty">No rooms yet.</li>');
 
   document.querySelectorAll('.roomrow').forEach((el) =>
     el.onclick = () => { selectedRoom = el.dataset.room; order = []; turnResult = null; refreshRoom(); renderSide(); });
 
   const waiting = state.participants.filter((p) => !p.room);
-  $('waiting').innerHTML = waiting.length
+  paint($('waiting'), waiting.length
     ? waiting.map((p) => `
         <li class="item">
           <div class="p-name">${esc(p.name)}</div>
@@ -186,7 +233,7 @@ function renderSide() {
             <button class="ghost" data-forget="${esc(p.name)}" title="Remove this participant record">✕</button>
           </div>
         </li>`).join('')
-    : '<li class="empty">Nobody waiting.</li>';
+    : '<li class="empty">Nobody waiting.</li>');
 
   document.querySelectorAll('[data-assign]').forEach((el) =>
     el.onchange = async () => {
@@ -272,15 +319,31 @@ function participantRow(p, d) {
     </li>`;
 }
 
+let roomSig = null;
+
 function renderRoom() {
   if (!selectedRoom) {
-    $('roompane').innerHTML = '<div class="empty">Select a room on the left, or create one.</div>';
+    if (roomSig === 'none') return;
+    roomSig = 'none';
+    paint($('roompane'), '<div class="empty">Select a room on the left, or create one.</div>');
     return;
   }
-  if (!roomData) { $('roompane').innerHTML = '<div class="empty">Loading…</div>'; return; }
+  if (!roomData) {
+    if (roomSig === 'loading') return;
+    roomSig = 'loading';
+    paint($('roompane'), '<div class="empty">Loading…</div>');
+    return;
+  }
+
+  // Everything the markup below depends on. If none of it moved, leave the DOM
+  // alone — that is what keeps the caret in the box you are typing in.
+  const sig = JSON.stringify([roomData, order, turnResult, busy, state.rooms.map((r) => r.name)]);
+  if (sig === roomSig) return;
+  roomSig = sig;
+
   const d = roomData.discussion;
 
-  $('roompane').innerHTML = `
+  paint($('roompane'), `
     <h2>Room · ${esc(selectedRoom)}</h2>
     <div class="grid2">
       <div class="stack">
@@ -322,7 +385,7 @@ function renderRoom() {
             </div>`).join('')
           : '<div class="empty">No messages yet.</div>'}</div>
       </div>
-    </div>`;
+    </div>`);
 
   const feed = $('feed');
   if (feed) feed.scrollTop = feed.scrollHeight;
@@ -341,16 +404,17 @@ function renderRoom() {
     if (!prompt) return alert('Write the issue first.');
     if (!order.length) return alert('Pick a speaking order.');
     const r = await post('/api/discussion', { room: selectedRoom, prompt, order });
-    if (r.status !== 'ok') alert(r.message);
+    if (r.status !== 'ok') return alert(r.message);
+    clearField('dprompt');
     order = [];
     refreshRoom();
   };
 
   $('sendbcast').onclick = async () => {
-    const body = $('bcast').value.trim();
+    const body = ($('bcast').value || '').trim();
     if (!body) return;
     await post('/api/broadcast', { room: selectedRoom, body });
-    $('bcast').value = '';
+    clearField('bcast');
     refreshRoom();
   };
 
@@ -412,6 +476,63 @@ function renderApp() {
   };
 }
 
+function renderWiring() {
+  if (!wiring) return;
+  const sig = JSON.stringify(wiring);
+  if (sig === wiringSig) return;
+  wiringSig = sig;
+  const w = wiring;
+
+  const row = (label, s, note) => `
+    <div class="row" style="justify-content:space-between; padding:5px 0">
+      <div>
+        <span class="tag ${s.ok ? 'ok' : 'no'}">${s.ok ? '✓' : '!'}</span>
+        <span style="margin-left:6px">${esc(label)}</span>
+        <span class="small muted" style="margin-left:8px">${esc(s.detail || '')}</span>
+      </div>
+      ${note ? `<span class="small muted">${note}</span>` : ''}
+    </div>`;
+
+  const allOk = w.claude_code.ok && w.hook.ok && (w.desktop.ok || w.desktop.missing);
+  const auto = w.auto_register;
+
+  paint($('wiring'), `
+    <h3>Wiring</h3>
+    ${row('Claude Code', w.claude_code)}
+    ${row('Auto-poll hook', w.hook)}
+    ${row('Claude Desktop', w.desktop, w.desktop.ok ? 'restart Desktop to pick it up' : '')}
+    <div class="row" style="margin-top:8px">
+      <button id="rewire">${allOk ? 'Re-apply setup' : 'Fix setup'}</button>
+      <span class="small muted">${allOk
+        ? 'Kept current automatically on every launch — this just does it now.'
+        : 'One click writes the missing config.'}</span>
+    </div>
+    <div class="small muted" style="margin-top:6px">
+      Auto-registration is
+      <b>${auto.enabled ? 'on' : 'off'}</b>${auto.enabled && auto.base ? ' for ' + esc(auto.base) : ''}.
+    </div>`);
+
+  $('rewire').onclick = async (e) => {
+    e.target.textContent = 'Applying…';
+    const r = await post('/api/rewire', {});
+    wiring = await api('/api/status');
+    wiringSig = null;
+    renderWiring();
+    if (r.status === 'ok' && r.changes && r.changes.length) {
+      alert('Applied:\n' + r.changes.join('\n') +
+        '\n\nRestart Claude Desktop and start a new Claude Code session to pick it up.');
+    } else if (r.status === 'ok') {
+      alert('Everything was already correct.');
+    } else {
+      alert(r.message || 'Could not apply setup.');
+    }
+  };
+
+  $('autoreg').textContent = auto.enabled && auto.base
+    ? `Sessions started in any immediate subfolder of this join the waiting room by themselves.`
+    : 'Pick your projects folder to have sessions join the boardroom automatically.';
+}
+
 function renderSetup() {
   if (!setup) return;
   $('dbpath').textContent = setup.db_path;
@@ -453,44 +574,88 @@ function wireCopy() {
 }
 
 function renderFolders(data) {
+  folders = data;
+  if (!data) return;
   if (data.status !== 'ok') {
-    $('folderlist').innerHTML = `<div class="banner err">${esc(data.message)}</div>`;
+    paint($('folderlist'), `<div class="banner err">${esc(data.message)}</div>`);
     return;
   }
-  $('folderlist').innerHTML = data.folders.length
-    ? `<ul>${data.folders.map((f) => `
-        <li class="item">
-          <div class="row" style="justify-content:space-between">
-            <div>
-              <span class="p-name">${esc(f.name)}</span>
-              <span class="tag ${f.detected ? 'ok' : 'no'}">${f.detected ? 'Claude-touched' : 'not detected'}</span>
-              ${f.boardroom_configured ? '<span class="tag ok">boardroom configured</span>' : ''}
-            </div>
-            <div class="row">
-              <button data-copy="${esc(setup ? setup.mcp_add_command : '')}">Copy mcp add</button>
-              <button data-write="${esc(f.path)}">Write .mcp.json</button>
-            </div>
-          </div>
-          <div class="small muted">${esc(f.path)}${f.markers.length ? ' · ' + f.markers.map(esc).join(', ') : ''}</div>
-        </li>`).join('')}</ul>`
-    : '<div class="empty">No subfolders found.</div>';
 
-  wireCopy();
-  document.querySelectorAll('[data-write]').forEach((el) =>
+  const detected = data.folders.filter((f) => f.detected);
+  const rest = data.folders.filter((f) => !f.detected);
+
+  const item = (f) => `
+    <li class="item">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <span class="p-name">${esc(f.name)}</span>
+          ${f.detected ? '<span class="tag ok">Claude-touched</span>' : '<span class="tag no">not detected</span>'}
+          ${f.participant
+            ? `<span class="tag ok">in boardroom${f.participant.room ? ' · ' + esc(f.participant.room) : ' · waiting'}</span>`
+            : ''}
+        </div>
+        <div class="row">
+          ${f.participant
+            ? `<button class="ghost" data-forget2="${esc(f.participant.name)}">Remove</button>`
+            : `<button class="primary" data-add="${esc(f.path)}">Add to boardroom</button>`}
+        </div>
+      </div>
+      <div class="small muted">${esc(f.path)}${f.markers.length ? ' · ' + f.markers.map(esc).join(', ') : ''}</div>
+    </li>`;
+
+  paint($('folderlist'), !data.folders.length
+    ? '<div class="empty">No subfolders found.</div>'
+    : `
+      <h3>Projects in ${esc(data.base)}</h3>
+      <div class="small muted" style="margin-bottom:8px">
+        Adding a project puts it in the waiting room now, so you can assign it and use
+        Begin Turn without waiting for a session to run there first. Anything under your
+        projects folder also joins on its own the next time a session takes a turn in it.
+      </div>
+      <ul>${detected.map(item).join('')}</ul>
+      ${rest.length ? `
+        <details style="margin-top:8px">
+          <summary>${rest.length} folder(s) with no sign of Claude</summary>
+          <ul style="margin-top:8px">${rest.map(item).join('')}</ul>
+        </details>` : ''}`);
+
+  document.querySelectorAll('[data-add]').forEach((el) =>
     el.onclick = async () => {
-      const r = await post('/api/mcp-json', { folder: el.dataset.write });
-      alert(r.message || r.status);
-      scan();
+      el.textContent = 'Adding…';
+      const r = await post('/api/add-project', { folder: el.dataset.add });
+      if (r.status === 'error') alert(r.message);
+      await scan();
+      refreshAll();
+    });
+
+  document.querySelectorAll('[data-forget2]').forEach((el) =>
+    el.onclick = async () => {
+      if (!confirm(`Remove "${el.dataset.forget2}" from the boardroom? Its messages stay in the room.`)) return;
+      await post('/api/forget', { name: el.dataset.forget2 });
+      await scan();
+      refreshAll();
     });
 }
 
 /* -------------------------------------------------------------------- actions */
 
 async function scan() {
-  const base = $('base').value.trim();
+  const base = ($('base').value || '').trim();
   if (!base) return;
   localStorage.setItem('boardroom.base', base);
   renderFolders(await api('/api/folders?base=' + encodeURIComponent(base)));
+}
+
+// Point auto-registration at this folder and list what is in it.
+async function useFolder() {
+  const base = ($('base').value || '').trim();
+  if (!base) return alert('Choose a folder first.');
+  const r = await post('/api/projects-dir', { base });
+  if (r.status !== 'ok') return alert(r.message);
+  wiring = await api('/api/status');
+  wiringSig = null;
+  renderWiring();
+  await scan();
 }
 
 async function refreshState() {
@@ -507,20 +672,23 @@ async function refreshRoom() {
 async function refreshAll() { await refreshState(); await refreshRoom(); }
 
 $('createroom').onclick = async () => {
-  const name = $('newroom').value.trim();
+  const name = ($('newroom').value || '').trim();
   if (!name) return;
   await post('/api/rooms', { name });
-  $('newroom').value = '';
+  clearField('newroom');
   selectedRoom = name;
   refreshAll();
 };
 $('newroom').onkeydown = (e) => { if (e.key === 'Enter') $('createroom').click(); };
-$('scan').onclick = scan;
-$('base').onkeydown = (e) => { if (e.key === 'Enter') scan(); };
+$('usefolder').onclick = useFolder;
+$('base').onkeydown = (e) => { if (e.key === 'Enter') useFolder(); };
 
 $('browse').onclick = async () => {
   const r = await post('/api/pick-folder', {});
-  if (r.status === 'ok') { $('base').value = r.path; scan(); }
+  if (r.status !== 'ok') return;
+  drafts.base = r.path;
+  $('base').value = r.path;
+  useFolder();
 };
 
 (async function init() {
@@ -529,12 +697,25 @@ $('browse').onclick = async () => {
   appInfo = await api('/api/app');
   renderApp();
   if (appInfo && appInfo.shell) $('browse').style.display = '';
-  const saved = localStorage.getItem('boardroom.base');
-  if (saved) { $('base').value = saved; }
+
+  wiring = await api('/api/status');
+  renderWiring();
+
+  // Prefer the folder auto-registration is already pointed at; fall back to
+  // whatever was last scanned in this browser.
+  const base = (wiring && wiring.auto_register && wiring.auto_register.base)
+    || localStorage.getItem('boardroom.base');
+  if (base) { $('base').value = base; drafts.base = base; scan(); }
+
   await refreshAll();
   setInterval(() => { if (!busy) refreshAll(); }, 2500);
-  // Update state changes on its own schedule, so poll it more gently.
-  setInterval(async () => { appInfo = await api('/api/app'); renderApp(); }, 10000);
+  // Update and wiring state move on their own schedule — poll them gently.
+  setInterval(async () => {
+    appInfo = await api('/api/app');
+    renderApp();
+    wiring = await api('/api/status');
+    renderWiring();
+  }, 10000);
 })();
 </script>
 </body>

@@ -4,6 +4,7 @@
 // UserPromptSubmit hook all call these same functions against the same SQLite
 // file, so a session sees exactly what the UI sees.
 
+const path = require('node:path');
 const { all, get, run, now } = require('./db');
 
 const WAITING = null; // room === null means "waiting room", i.e. unassigned
@@ -107,6 +108,37 @@ function register({ name, cwd }) {
         ? 'Registered. You are in the waiting room until a moderator assigns you to a room.'
         : `Registered. You are assigned to room "${p.room}".`,
   };
+}
+
+// Register a folder under its own name. Used both by the hook (when a session
+// starts somewhere we auto-register) and by the setup panel (when you add a
+// project by hand), so the two agree on naming.
+function registerFolder({ folder }) {
+  if (!folder) return { status: 'error', message: 'folder is required' };
+
+  const target = path.resolve(String(folder));
+  const rows = all('SELECT name, folder_path FROM participants');
+
+  const same = (a, b) =>
+    a && b && path.resolve(a).replace(/[\\/]+$/, '').toLowerCase() ===
+      path.resolve(b).replace(/[\\/]+$/, '').toLowerCase();
+
+  const existing = rows.find((r) => same(r.folder_path, target));
+  if (existing) {
+    const p = participant(existing.name);
+    return { status: 'exists', name: p.name, room: p.room, folder_path: p.folder_path };
+  }
+
+  const taken = new Set(rows.map((r) => r.name.toLowerCase()));
+  let name = path.basename(target);
+  if (taken.has(name.toLowerCase())) {
+    let i = 2;
+    while (taken.has(`${name}-${i}`.toLowerCase())) i++;
+    name = `${name}-${i}`;
+  }
+
+  const res = register({ name, cwd: target });
+  return res.status === 'ok' ? { ...res, created: true } : res;
 }
 
 /* -------------------------------------------------------------------- posting */
@@ -578,6 +610,7 @@ function turnPrompt(status) {
 
 module.exports = {
   register,
+  registerFolder,
   postMessage,
   getMessages,
   listParticipants,

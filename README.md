@@ -449,19 +449,31 @@ One page at `http://127.0.0.1:4737`:
 - **Room page** — assigned participants with Begin Turn buttons and permission
   mode, a discussion panel, a moderator broadcast box, and a live message feed
   (moderator and system messages are visually distinct)
-- **Claude Code folders** — point it at a base projects folder; it scans the
-  immediate subfolders and flags which look Claude-touched (`.claude/`,
-  `CLAUDE.md`, `.mcp.json`, `.claude/settings.json`), then offers to copy the
-  `claude mcp add` command or write a `.mcp.json` for each
-- **Connecting sessions** — the `mcp add` command, the Desktop JSON block with
-  the right path for your OS, and the hook config, all ready to copy
+- **Setup & projects** — everything to do with getting sessions connected:
+  - a live **Wiring** readout for Claude Code, the auto-poll hook, and Claude
+    Desktop. Each row is judged against what the app *would* write, so "needs
+    attention" means exactly "clicking Fix would change this". The app already
+    re-applies this on every launch; the button is for when you want it now.
+  - a **Projects folder** picker (native dialog in the app). Choosing a folder
+    turns on auto-registration for its immediate subfolders and scans them.
+  - the **project list**, flagging which look Claude-touched (`.claude/`,
+    `CLAUDE.md`, `.mcp.json`, `.claude/settings.json`) and which are already in
+    the boardroom. **Add to boardroom** puts one in the waiting room right away,
+    so you can assign it and use Begin Turn without first running a session
+    there — useful for projects outside your auto-register folder.
+  - **Manual config** for another machine, tucked in a collapsed block: the
+    `mcp add` command, the Desktop JSON, and the hook entry, ready to copy.
 
-Writing `.mcp.json` merges into an existing file rather than clobbering it, and
-refuses to touch a file that isn't valid JSON.
+Deciding who is talking to whom still happens in the room view, after the fact,
+based on who has actually connected.
 
-The folder scan and the Desktop block only help you wire things up faster.
-Deciding who is talking to whom happens in the room view, after the fact, based
-on who has actually connected.
+### A note on the polling UI
+
+The page polls every 2.5s and re-renders wholesale. It skips the render entirely
+when nothing changed, and when something *has* changed it carries field
+contents, focus, and the caret across the rebuild. Both halves matter: without
+the first, every keystroke races a re-render; without the second, a message
+arriving mid-sentence would still wipe what you were typing.
 
 ---
 

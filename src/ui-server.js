@@ -12,6 +12,7 @@ const { spawn, execFileSync } = require('node:child_process');
 
 const core = require('./core');
 const wiring = require('./wiring');
+const config = require('./config');
 const { DB_PATH, schemaVersion } = require('./db');
 
 const PORT = Number(process.env.BOARDROOM_UI_PORT || 4737);
@@ -200,12 +201,18 @@ function scanFolders(base) {
     } catch {
       /* no .mcp.json, or not ours */
     }
+    const norm = (p) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+    const joined = core
+      .listParticipants({})
+      .participants.find((p) => p.folder_path && norm(p.folder_path) === norm(full));
+
     return {
       name: e.name,
       path: full,
       detected: found.length > 0,
       markers: found,
       boardroom_configured: connected,
+      participant: joined ? { name: joined.name, room: joined.room } : null,
     };
   });
 
@@ -235,6 +242,45 @@ function writeMcpJson({ folder }) {
     status: 'ok',
     file,
     message: `Wrote ${file}. The next Claude Code session started in that folder picks it up (and will ask you to approve the project server once).`,
+  };
+}
+
+/* -------------------------------------------------------------- project setup */
+
+// Point auto-registration at a projects folder, or switch it off. Sessions
+// started in an immediate subfolder then join the waiting room by themselves.
+function setProjectsDir({ base, enabled }) {
+  if (enabled === false) {
+    return { status: 'ok', ...config.write({ autoRegisterEnabled: false }) };
+  }
+  if (!base) return { status: 'error', message: 'base is required' };
+  if (!fs.existsSync(base)) return { status: 'error', message: `not found: ${base}` };
+  if (!fs.statSync(base).isDirectory()) return { status: 'error', message: `not a directory: ${base}` };
+
+  const next = config.write({
+    autoRegisterEnabled: enabled === undefined ? true : Boolean(enabled),
+    autoRegisterBase: path.resolve(base),
+  });
+  return {
+    status: 'ok',
+    ...next,
+    message: `Sessions started in immediate subfolders of ${next.autoRegisterBase} will join the waiting room on their next turn.`,
+  };
+}
+
+// Add one folder as a participant without waiting for a session to run there.
+// Useful for projects outside the auto-register base.
+function addProject({ folder }) {
+  if (!folder) return { status: 'error', message: 'folder is required' };
+  if (!fs.existsSync(folder)) return { status: 'error', message: `not found: ${folder}` };
+  const res = core.registerFolder({ folder });
+  if (res.status === 'exists') {
+    return { ...res, message: `Already in the boardroom as "${res.name}".` };
+  }
+  if (res.status !== 'ok') return res;
+  return {
+    ...res,
+    message: `Added as "${res.name}", waiting for you to assign it to a room.`,
   };
 }
 
@@ -343,6 +389,8 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, scanFolders(url.searchParams.get('base')));
         case '/api/setup':
           return json(res, 200, setupInfo());
+        case '/api/status':
+          return json(res, 200, require('../setup/install').status(RUNTIME));
         case '/api/app':
           return json(res, 200, BRIDGE ? await BRIDGE.appInfo() : { status: 'ok', shell: false });
       }
@@ -367,6 +415,10 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, writeMcpJson(body));
         case '/api/begin-turn':
           return json(res, 200, await beginTurn(body));
+        case '/api/projects-dir':
+          return json(res, 200, setProjectsDir(body));
+        case '/api/add-project':
+          return json(res, 200, addProject(body));
 
         // Everything below needs the Electron shell.
         case '/api/pick-folder':

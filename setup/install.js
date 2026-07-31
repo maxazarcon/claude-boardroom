@@ -204,7 +204,75 @@ function apply(ctx = {}, opts = {}) {
   };
 }
 
-module.exports = { apply, CLAUDE_JSON, CLAUDE_SETTINGS, DESKTOP_CONFIG };
+// Read-only view of how Claude is currently wired, for the app's setup panel.
+// Deliberately compares against what apply() *would* write, so "needs
+// attention" means exactly "clicking Re-apply would change this".
+function status(ctx = {}) {
+  const want = wiring.mcpServerEntry(ctx);
+  const wantHook = wiring.hookCommand();
+
+  const readSafe = (file) => {
+    try {
+      return { cfg: readJson(file), error: null };
+    } catch (err) {
+      return { cfg: null, error: err.message };
+    }
+  };
+
+  const mcpState = (file, { needsFile }) => {
+    const { cfg, error } = readSafe(file);
+    if (error) return { ok: false, detail: `config is not valid JSON: ${error}`, path: file };
+    if (cfg === null) {
+      return {
+        ok: false,
+        missing: true,
+        detail: needsFile ? 'config file not found — is this app installed?' : 'not set up yet',
+        path: file,
+      };
+    }
+    const have = cfg.mcpServers && cfg.mcpServers.boardroom;
+    if (!have) return { ok: false, detail: 'not registered', path: file };
+    if (JSON.stringify(have) !== JSON.stringify(want)) {
+      return { ok: false, detail: 'points somewhere else — re-apply to fix', path: file, have };
+    }
+    return { ok: true, detail: 'registered', path: file };
+  };
+
+  const hookState = (() => {
+    const { cfg, error } = readSafe(CLAUDE_SETTINGS);
+    if (error) return { ok: false, detail: `settings.json is not valid JSON: ${error}`, path: CLAUDE_SETTINGS };
+    const groups = (cfg && cfg.hooks && cfg.hooks.UserPromptSubmit) || [];
+    const ours = groups.flatMap((g) => (g.hooks || []).filter(
+      (h) => typeof h.command === 'string' && h.command.includes('boardroom-hook')
+    ));
+    if (!ours.length) return { ok: false, detail: 'not installed', path: CLAUDE_SETTINGS };
+    if (ours.length > 1) return { ok: false, detail: `${ours.length} duplicate entries — re-apply to fix`, path: CLAUDE_SETTINGS };
+    if (ours[0].command !== wantHook) return { ok: false, detail: 'points somewhere else — re-apply to fix', path: CLAUDE_SETTINGS };
+    return { ok: true, detail: 'installed', path: CLAUDE_SETTINGS };
+  })();
+
+  let auto = {};
+  try {
+    auto = readJson(path.join(DB_DIR, 'config.json')) || {};
+  } catch {
+    auto = {};
+  }
+
+  return {
+    status: 'ok',
+    entry: want,
+    claude_code: mcpState(CLAUDE_JSON, { needsFile: false }),
+    desktop: mcpState(DESKTOP_CONFIG, { needsFile: true }),
+    hook: hookState,
+    shim: { ok: fs.existsSync(wiring.SHIM), path: wiring.SHIM },
+    auto_register: {
+      enabled: Boolean(auto.autoRegisterEnabled),
+      base: auto.autoRegisterBase || null,
+    },
+  };
+}
+
+module.exports = { apply, status, CLAUDE_JSON, CLAUDE_SETTINGS, DESKTOP_CONFIG };
 
 /* ---------------------------------------------------------------------- CLI */
 
