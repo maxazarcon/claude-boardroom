@@ -132,20 +132,31 @@ function readState() {
   }
 }
 
-// Remember that we have successfully read a config, so that a later process
-// which cannot see it is recognised as a visibility problem rather than
-// reported as "not installed".
+// Record each config we have read, along with the boardroom entry it contained
+// at the time. Two things depend on this.
 //
-// This matters because "absent" and "invisible to this process" are not always
-// distinguishable: a process relaunched by the NSIS updater has been observed
-// getting ENOENT for the whole of %APPDATA%\Claude — same user, same path,
-// directory plainly there — while a directly launched copy reads it fine.
-// Whatever causes that, forgetting what we already knew is the one response
-// guaranteed to be wrong.
-function rememberSeen(file) {
+// First, telling "not there" apart from "not visible to this process". A
+// process can be denied sight of a directory that plainly exists: inside a
+// Claude Desktop agent session, %APPDATA%\Claude and %APPDATA%\Electron are
+// hidden from spawned processes — 122 of 124 siblings list fine, the ACLs are
+// identical to the readable parent, and the same binary launched outside that
+// session reads them without trouble. Treating that as "uninstalled" and
+// recreating the file would throw away the user's Desktop preferences.
+//
+// Second, and more usefully: if what we last wrote is exactly what we would
+// write now, the config is already correct and there is nothing to do — no
+// need to read it, and nothing to bother the user about.
+function rememberSeen(file, entry) {
   const state = readState();
-  const seen = { ...(state.configsSeen || {}), [file]: new Date().toISOString() };
-  if (JSON.stringify(seen) === JSON.stringify(state.configsSeen || {})) return;
+  const seen = { ...(state.configsSeen || {}) };
+  const next = { at: new Date().toISOString(), entry: entry || null };
+  const prev = seen[file];
+  // Only rewrite when the entry actually changed; the timestamp alone is not
+  // worth the disk write on every status poll.
+  if (prev && typeof prev === 'object' && JSON.stringify(prev.entry) === JSON.stringify(next.entry)) {
+    return;
+  }
+  seen[file] = next;
   try {
     fs.mkdirSync(DB_DIR, { recursive: true });
     fs.writeFileSync(STATE_FILE(), JSON.stringify({ ...state, configsSeen: seen }, null, 2) + '\n');
@@ -154,8 +165,21 @@ function rememberSeen(file) {
   }
 }
 
+// Older versions stored a bare timestamp string.
+function lastKnown(file) {
+  const v = (readState().configsSeen || {})[file];
+  if (!v) return null;
+  return typeof v === 'string' ? { at: v, entry: null } : v;
+}
+
 function seenBefore(file) {
-  return Boolean((readState().configsSeen || {})[file]);
+  return Boolean(lastKnown(file));
+}
+
+// True when we wrote exactly this entry and have no reason to think it changed.
+function knownCurrent(file, entry) {
+  const known = lastKnown(file);
+  return Boolean(known && known.entry && JSON.stringify(known.entry) === JSON.stringify(entry));
 }
 
 function makeBackupDir() {
@@ -179,9 +203,14 @@ function writeJson(file, data, state) {
 function mcpServers(file, label, { create, remove, entry }, state) {
   const seen = probe(file);
   if (seen.state === 'unreadable' || (seen.state === 'absent' && seenBefore(file))) {
+    // If the entry we last wrote is what we would write now, the file is
+    // already right and not being able to read it changes nothing.
+    if (!remove && knownCurrent(file, entry)) {
+      return state.skipped.push(`${label}: already correct (from our own record)`);
+    }
     state.problems.push(
       `${label}: ${file} could not be read from this process${seen.code ? ` (${seen.code})` : ''}, ` +
-        `but it was readable before — left untouched rather than recreated. Restart Claude Boardroom and try again.`
+        `and it differs from what we last wrote — left untouched rather than recreated.`
     );
     return;
   }
@@ -210,15 +239,16 @@ function mcpServers(file, label, { create, remove, entry }, state) {
     return;
   }
 
-  rememberSeen(file);
-
   const current = cfg.mcpServers && cfg.mcpServers.boardroom;
+  rememberSeen(file, current);
+
   if (current && JSON.stringify(current) === JSON.stringify(entry)) {
     return state.skipped.push(`${label}: already correct`);
   }
   cfg.mcpServers = cfg.mcpServers || {};
   cfg.mcpServers.boardroom = entry;
   writeJson(file, cfg, state);
+  rememberSeen(file, entry);
   state.changes.push(`${label}: ${current ? 'updated to current install' : 'registered'}`);
 }
 
@@ -350,16 +380,36 @@ function status(ctx = {}) {
   };
 
   const mcpState = (file, { needsFile }) => {
-    const seen = probe(file);
-    if (seen.state === 'unreadable') {
+    const unseeable = (why) => {
+      // Correct is correct: if we wrote this exact entry, not being able to
+      // re-read it right now is not a problem the user needs to hear about.
+      if (knownCurrent(file, want)) {
+        return {
+          ok: true,
+          fromRecord: true,
+          detail: 'registered (confirmed from our own record)',
+          path: file,
+        };
+      }
       return {
         ok: false,
         unreadable: true,
-        transient: seenBefore(file),
+        transient: true,
         code: seen.code,
-        detail: seenBefore(file)
-          ? 'rechecking — it was readable a moment ago'
-          : `on disk but unreadable from this process (${seen.code})`,
+        detail: why,
+        diagnosis: diagnose(file),
+        path: file,
+      };
+    };
+
+    const seen = probe(file);
+    if (seen.state === 'unreadable') {
+      if (seenBefore(file)) return unseeable('readable before, but not from this process');
+      return {
+        ok: false,
+        unreadable: true,
+        code: seen.code,
+        detail: `on disk but unreadable from this process (${seen.code})`,
         diagnosis: diagnose(file),
         path: file,
       };
@@ -370,16 +420,7 @@ function status(ctx = {}) {
     if (cfg === null) {
       // We have read this file before, so "gone" is far more likely to mean
       // "this process cannot see it" than that Claude Desktop was uninstalled.
-      if (seenBefore(file)) {
-        return {
-          ok: false,
-          unreadable: true,
-          transient: true,
-          detail: 'rechecking — it was readable a moment ago',
-          diagnosis: diagnose(file),
-          path: file,
-        };
-      }
+      if (seenBefore(file)) return unseeable('readable before, but not from this process');
       return {
         ok: false,
         missing: true,
@@ -387,8 +428,8 @@ function status(ctx = {}) {
         path: file,
       };
     }
-    rememberSeen(file);
     const have = cfg.mcpServers && cfg.mcpServers.boardroom;
+    rememberSeen(file, have);
     if (!have) return { ok: false, detail: 'not registered', path: file };
     if (JSON.stringify(have) !== JSON.stringify(want)) {
       return { ok: false, detail: 'points somewhere else — re-apply to fix', path: file, have };

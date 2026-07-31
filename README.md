@@ -557,35 +557,40 @@ base64 of a `.pfx`) and `CSC_KEY_PASSWORD` before `npm run release`;
 electron-builder picks them up with no config change. Signed builds also make
 auto-update quieter, since the updater verifies signatures on Windows.
 
-### Known: the process relaunched after an update can be half-blind
+### A process can be denied sight of `%APPDATA%\Claude`
 
-Transient, mechanism not established. For a while after an update installs, an
-app process gets `ENOENT` for the whole of `%APPDATA%\Claude`, so the Claude
-Desktop config looks like it isn't there. Same user, same computed path, the
-directory plainly on disk, and the *same binary* started again a moment later
-reads it fine.
+Measured, not guessed. In some processes `%APPDATA%\Claude` comes back `ENOENT`
+while everything around it reads normally. What the diagnostics showed:
 
-Three explanations were tested and ruled out. It is not a token or profile
-mismatch (`GetOwner` and `os.homedir()` both check out). It is not a locked or
-unreadable file (a directory listing doesn't show it either). And it is not
-specific to the `--updated` relaunch, which was the first guess: a process
-started without that flag has shown it too, and a later one without the flag
-was fine. Whatever it is, it clears on its own.
+- `C:\Users\<you>\AppData\Roaming` stats fine; `...\Roaming\Claude` under it is
+  `ENOENT`
+- listing `Roaming` from that process returns **122 of 124** entries — the two
+  missing are exactly `Claude` and `Electron`
+- the ACLs on `Claude` and its readable parent are identical, the directory is
+  owned by the same user, and it is not a reparse point
+- the same binary launched from an ordinary shell reads it without trouble
+- the restriction is inherited: a relaunched child is denied too
 
-What the app does about it, since the cause is unknown:
+That is a deny-list, not a filesystem fault, and it lands on the two
+directories holding Claude Desktop's own configuration. It shows up when the app
+is updated from inside a Claude Desktop agent session, because everything the
+installer spawns inherits that session's restrictions. Updating the app
+normally, outside such a session, does not hit it.
 
-- it records every config it has successfully read, so a later "absent" is
-  reported as *"was readable before but not from this process"* rather than
-  "Claude Desktop not installed"
-- in that state it **leaves the file alone** instead of recreating it, which is
-  what would otherwise throw away your Desktop preferences
-- it re-applies the wiring whenever the window is shown, and on the next normal
-  launch, so the condition clears by itself
+Three earlier theories were tested and ruled out along the way: a token or
+profile mismatch, a locked file, and something specific to the `--updated`
+relaunch flag. Restarting the app was tried too and does not help, since the new
+process inherits the same restriction.
 
-Practical effect: after an update, the Claude Desktop row may show that warning
-until you next start the app normally. Claude Code and the hook are unaffected,
-and nothing is lost either way — the install path does not change between
-updates, so the existing config stays correct throughout.
+The app handles it without needing to care which of these is happening:
+
+- it records each config it writes, along with the entry it wrote
+- if it later cannot read that file but the entry it would write is **identical
+  to the one it recorded**, there is nothing to do — the row reads *registered
+  (confirmed from our own record)* and you are told nothing, because nothing is
+  wrong
+- if the record does **not** match, it says so and **leaves the file alone**
+  rather than recreating it, which would discard your Desktop preferences
 
 ### Schema changes
 

@@ -363,6 +363,54 @@ check('a diagnosis pinpoints the first path level that fails', () => {
   assert.ok(d.home, 'diagnosis records the home it resolved');
 });
 
+check('a config we wrote stays "correct" even when it turns unreadable', () => {
+  // Runs install.js against a throwaway HOME/APPDATA in a child process, so the
+  // real status()/apply() are exercised. A process can be denied sight of
+  // %APPDATA%\Claude while its siblings list fine; the entry we last wrote is
+  // then the only evidence available, and it is enough.
+  const { execFileSync } = require('node:child_process');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'fakehome-'));
+  const roaming = path.join(sandbox, 'AppData', 'Roaming');
+  const claudeDir = path.join(roaming, 'Claude');
+  const desktopCfg = path.join(claudeDir, 'claude_desktop_config.json');
+  const brHome = path.join(sandbox, '.claude-boardroom');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.mkdirSync(brHome, { recursive: true });
+
+  const env = { ...process.env, USERPROFILE: sandbox, HOME: sandbox, APPDATA: roaming, BOARDROOM_HOME: brHome };
+  const runner = path.join(sandbox, 'run.js');
+  fs.writeFileSync(runner, `
+    const inst = require(${JSON.stringify(path.join(__dirname, '..', 'setup', 'install.js'))});
+    const ctx = { execPath: 'C:\\\\apps\\\\boardroom.exe', isElectron: true, packaged: true };
+    const out = process.argv[2] === 'apply' ? inst.apply(ctx, {}) : inst.status(ctx);
+    console.log(JSON.stringify(process.argv[2] === 'apply'
+      ? { skipped: out.skipped, problems: out.problems }
+      : { ok: out.desktop.ok, fromRecord: !!out.desktop.fromRecord }));
+  `);
+  const run = (m) => JSON.parse(execFileSync(process.execPath, [runner, m], { env, encoding: 'utf8' }).trim());
+
+  fs.writeFileSync(desktopCfg, JSON.stringify({ preferences: { keepMe: true } }));
+  run('apply');
+  assert.deepStrictEqual(run('status'), { ok: true, fromRecord: false }, 'readable config reads as registered');
+
+  // Now make it unseeable the way the sandbox does.
+  fs.rmSync(claudeDir, { recursive: true, force: true });
+  assert.deepStrictEqual(run('status'), { ok: true, fromRecord: true }, 'unreadable but unchanged is still correct');
+
+  const applied = run('apply');
+  assert.deepStrictEqual(applied.problems, [], 'nothing to complain about');
+  assert.ok(!fs.existsSync(desktopCfg), 'must not recreate a config it cannot see');
+
+  // A record that no longer matches must surface, not be waved through.
+  const stateFile = path.join(brHome, 'config.json');
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  state.configsSeen[desktopCfg] = { at: new Date().toISOString(), entry: { command: 'old', args: [] } };
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+  assert.strictEqual(run('status').ok, false, 'a stale record is reported, not hidden');
+
+  fs.rmSync(sandbox, { recursive: true, force: true });
+});
+
 check('stopping a round-robin that is not running is harmless', () => {
   const r = ui.stopAutorun();
   assert.strictEqual(r.status, 'ok');
