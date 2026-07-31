@@ -86,6 +86,42 @@ function probe(file) {
   }
 }
 
+const STATE_FILE = () => path.join(DB_DIR, 'config.json');
+
+function readState() {
+  try {
+    return readJson(STATE_FILE()) || {};
+  } catch {
+    return {};
+  }
+}
+
+// Remember that we have successfully read a config, so that a later process
+// which cannot see it is recognised as a visibility problem rather than
+// reported as "not installed".
+//
+// This matters because "absent" and "invisible to this process" are not always
+// distinguishable: a process relaunched by the NSIS updater has been observed
+// getting ENOENT for the whole of %APPDATA%\Claude — same user, same path,
+// directory plainly there — while a directly launched copy reads it fine.
+// Whatever causes that, forgetting what we already knew is the one response
+// guaranteed to be wrong.
+function rememberSeen(file) {
+  const state = readState();
+  const seen = { ...(state.configsSeen || {}), [file]: new Date().toISOString() };
+  if (JSON.stringify(seen) === JSON.stringify(state.configsSeen || {})) return;
+  try {
+    fs.mkdirSync(DB_DIR, { recursive: true });
+    fs.writeFileSync(STATE_FILE(), JSON.stringify({ ...state, configsSeen: seen }, null, 2) + '\n');
+  } catch {
+    /* remembering is best-effort */
+  }
+}
+
+function seenBefore(file) {
+  return Boolean((readState().configsSeen || {})[file]);
+}
+
 function makeBackupDir() {
   return path.join(DB_DIR, 'config-backups', new Date().toISOString().replace(/[:.]/g, '-'));
 }
@@ -106,9 +142,10 @@ function writeJson(file, data, state) {
 
 function mcpServers(file, label, { create, remove, entry }, state) {
   const seen = probe(file);
-  if (seen.state === 'unreadable') {
+  if (seen.state === 'unreadable' || (seen.state === 'absent' && seenBefore(file))) {
     state.problems.push(
-      `${label}: could not read ${file} from this process (${seen.code}) — left untouched. Restart Claude Boardroom and try again.`
+      `${label}: ${file} could not be read from this process${seen.code ? ` (${seen.code})` : ''}, ` +
+        `but it was readable before — left untouched rather than recreated. Restart Claude Boardroom and try again.`
     );
     return;
   }
@@ -136,6 +173,8 @@ function mcpServers(file, label, { create, remove, entry }, state) {
     }
     return;
   }
+
+  rememberSeen(file);
 
   const current = cfg.mcpServers && cfg.mcpServers.boardroom;
   if (current && JSON.stringify(current) === JSON.stringify(entry)) {
@@ -289,6 +328,16 @@ function status(ctx = {}) {
     const { cfg, error } = readSafe(file);
     if (error) return { ok: false, detail: `config is not valid JSON: ${error}`, path: file };
     if (cfg === null) {
+      // We have read this file before, so "gone" is far more likely to mean
+      // "this process cannot see it" than that Claude Desktop was uninstalled.
+      if (seenBefore(file)) {
+        return {
+          ok: false,
+          unreadable: true,
+          detail: 'was readable before but not from this process — restart Claude Boardroom',
+          path: file,
+        };
+      }
       return {
         ok: false,
         missing: true,
@@ -296,6 +345,7 @@ function status(ctx = {}) {
         path: file,
       };
     }
+    rememberSeen(file);
     const have = cfg.mcpServers && cfg.mcpServers.boardroom;
     if (!have) return { ok: false, detail: 'not registered', path: file };
     if (JSON.stringify(have) !== JSON.stringify(want)) {
