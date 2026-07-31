@@ -391,12 +391,20 @@ function status(ctx = {}) {
           path: file,
         };
       }
+      // Records written before the entry was stored carry only a timestamp,
+      // so there is nothing to compare against. That resolves itself the first
+      // time the file is readable, which is worth saying rather than leaving
+      // an upgrader staring at a warning with no action attached.
+      const known = lastKnown(file);
+      const legacy = Boolean(known && !known.entry);
       return {
         ok: false,
         unreadable: true,
         transient: true,
         code: seen.code,
-        detail: why,
+        detail: legacy
+          ? 'not readable from this process — will confirm itself on the next normal launch'
+          : why,
         diagnosis: diagnose(file),
         path: file,
       };
