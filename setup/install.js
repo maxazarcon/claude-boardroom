@@ -33,33 +33,56 @@ const DESKTOP_CONFIG =
 /* ----------------------------------------------------------------- file I/O */
 
 function readJson(file) {
-  if (!fs.existsSync(file)) return null;
-  const raw = fs.readFileSync(file, 'utf8');
+  // Read first and interpret the failure, rather than trusting existsSync —
+  // see probe() for why that distinction is load-bearing here.
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
   if (!raw.trim()) return {};
   return JSON.parse(raw); // throw loudly rather than clobber a file we can't parse
 }
 
-// "Not there" and "this process cannot see it" look identical to existsSync,
+// "Not there" and "this process cannot read it" look identical to existsSync,
 // and treating the second as the first is how you silently skip updating a
 // config that very much exists.
 //
-// This is not hypothetical: after electron-updater's quitAndInstall, the
-// relaunched process has been observed computing the right path to
-// %APPDATA%\Claude\claude_desktop_config.json and still failing to read it,
-// while a normally-launched copy reads it fine. The NSIS path goes through
-// elevate.exe, so the new process is not necessarily the same token.
+// This is not hypothetical. After electron-updater's quitAndInstall, the
+// relaunched process computes the right path to
+// %APPDATA%\Claude\claude_desktop_config.json, the file is on disk with the
+// right contents, and existsSync still answers false — while a normally
+// launched copy reads it fine. So do not ask existsSync. Try to read the file,
+// and when that fails, ask the directory whether the name is there: a listing
+// that contains it settles the question no matter what stat claims.
 function probe(file) {
-  if (fs.existsSync(file)) return { state: 'present' };
   try {
-    fs.readdirSync(HOME); // can this process see the profile at all?
+    fs.readFileSync(file);
+    return { state: 'present' };
   } catch (err) {
-    return { state: 'unreadable', code: err.code };
-  }
-  try {
-    fs.readdirSync(path.dirname(file));
-    return { state: 'absent' };
-  } catch (err) {
-    return err.code === 'ENOENT' ? { state: 'absent' } : { state: 'unreadable', code: err.code };
+    const code = err.code || 'EUNKNOWN';
+    let listing = null;
+    try {
+      listing = fs.readdirSync(path.dirname(file));
+    } catch {
+      /* cannot list the directory either */
+    }
+
+    if (listing && listing.includes(path.basename(file))) {
+      return { state: 'unreadable', code };
+    }
+    if (listing) return { state: 'absent' };
+
+    // The directory would not list. Only call it absent if it is really gone.
+    let dirGone = false;
+    try {
+      fs.statSync(path.dirname(file));
+    } catch (e) {
+      dirGone = e.code === 'ENOENT';
+    }
+    return dirGone ? { state: 'absent' } : { state: 'unreadable', code };
   }
 }
 
@@ -257,7 +280,8 @@ function status(ctx = {}) {
       return {
         ok: false,
         unreadable: true,
-        detail: `couldn't be read from this process (${seen.code}) — restart Claude Boardroom`,
+        code: seen.code,
+        detail: `on disk but unreadable from this process (${seen.code}) — restart Claude Boardroom`,
         path: file,
       };
     }
