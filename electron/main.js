@@ -16,7 +16,7 @@ const { DB_PATH } = require('../src/db');
 
 // Claude launches our MCP server and hook by invoking this same executable
 // with ELECTRON_RUN_AS_NODE=1, so no separate Node install is required.
-const RUNTIME = { packaged: app.isPackaged, execPath: process.execPath };
+const RUNTIME = { packaged: app.isPackaged, execPath: process.execPath, isElectron: true };
 
 let win = null;
 let tray = null;

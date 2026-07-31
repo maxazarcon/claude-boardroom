@@ -57,3 +57,7 @@ publish:
   provider: github
   owner: maxazarcon
   repo: claude-boardroom
+  # electron-builder drafts releases by default, and installed copies cannot
+  # see a draft — it would upload fine and update nothing. Publish outright.
+  # Switch back to `draft` if you ever want to review notes before shipping.
+  releaseType: release

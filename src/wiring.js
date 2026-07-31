@@ -27,14 +27,21 @@ const SHIM = path.join(BIN_DIR, process.platform === 'win32' ? 'boardroom-hook.c
 function context(ctx = {}) {
   return {
     execPath: ctx.execPath || process.execPath,
+    // The thing that decides how to invoke a script is whether the executable
+    // is an Electron binary, NOT whether the app is packaged. The dev binary
+    // in node_modules needs ELECTRON_RUN_AS_NODE every bit as much as the
+    // installed one — without it Electron boots an app instead of running the
+    // script, and the MCP server never speaks a word on stdout.
+    isElectron:
+      ctx.isElectron === undefined ? Boolean(process.versions.electron) : Boolean(ctx.isElectron),
     packaged: Boolean(ctx.packaged),
   };
 }
 
 // How to run one of our scripts.
 function launcher(ctx) {
-  const { execPath, packaged } = context(ctx);
-  return packaged
+  const { execPath, isElectron } = context(ctx);
+  return isElectron
     ? { command: execPath, env: { ELECTRON_RUN_AS_NODE: '1' } }
     : { command: execPath, env: {} };
 }

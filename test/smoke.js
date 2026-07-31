@@ -252,6 +252,37 @@ check('permission mode is per participant and validated', () => {
   assert.strictEqual(core.setPermissionMode({ name: 'alice', permission_mode: 'yolo' }).status, 'error');
 });
 
+/* ------------------------------------------------------------------- wiring */
+
+const wiring = require('../src/wiring');
+
+check('a plain Node runtime needs no special environment', () => {
+  const e = wiring.mcpServerEntry({ execPath: '/usr/bin/node', isElectron: false });
+  assert.strictEqual(e.command, '/usr/bin/node');
+  assert.strictEqual(e.env, undefined);
+});
+
+check('ANY Electron binary gets ELECTRON_RUN_AS_NODE, packaged or not', () => {
+  // Regression: keying this off `packaged` produced a config that launched an
+  // Electron app instead of running the MCP server, so the server loaded but
+  // never spoke on stdout.
+  for (const packaged of [true, false]) {
+    const e = wiring.mcpServerEntry({ execPath: '/apps/boardroom.exe', isElectron: true, packaged });
+    assert.deepStrictEqual(e.env, { ELECTRON_RUN_AS_NODE: '1' }, `packaged=${packaged}`);
+  }
+});
+
+check('the hook shim path is stable, so settings.json survives updates', () => {
+  const before = wiring.SHIM;
+  wiring.writeHookShim({ execPath: '/v1/boardroom.exe', isElectron: true });
+  const after = wiring.SHIM;
+  assert.strictEqual(before, after);
+  // A new install location changes the shim's contents, never its path.
+  const second = wiring.writeHookShim({ execPath: '/v2/boardroom.exe', isElectron: true });
+  assert.strictEqual(second.path, before);
+  assert.ok(fs.readFileSync(second.path, 'utf8').includes('/v2/boardroom.exe'));
+});
+
 console.log(`\n${n} checks passed.`);
 require('../src/db').close();
 fs.rmSync(process.env.BOARDROOM_HOME, { recursive: true, force: true });
