@@ -559,14 +559,18 @@ auto-update quieter, since the updater verifies signatures on Windows.
 
 ### Known: the process relaunched after an update can be half-blind
 
-Reproducible, mechanism not established. The process electron-updater
-relaunches after installing an update — the one whose command line carries
-`--updated` — gets `ENOENT` for the whole of `%APPDATA%\Claude`, so the Claude
+Transient, mechanism not established. For a while after an update installs, an
+app process gets `ENOENT` for the whole of `%APPDATA%\Claude`, so the Claude
 Desktop config looks like it isn't there. Same user, same computed path, the
-directory plainly on disk, and the *same binary* launched normally reads it
-fine. Two plausible explanations were tested and ruled out: it is not a token
-or profile mismatch (`GetOwner` and `os.homedir()` both check out), and it is
-not a locked or unreadable file (a directory listing does not show it either).
+directory plainly on disk, and the *same binary* started again a moment later
+reads it fine.
+
+Three explanations were tested and ruled out. It is not a token or profile
+mismatch (`GetOwner` and `os.homedir()` both check out). It is not a locked or
+unreadable file (a directory listing doesn't show it either). And it is not
+specific to the `--updated` relaunch, which was the first guess: a process
+started without that flag has shown it too, and a later one without the flag
+was fine. Whatever it is, it clears on its own.
 
 What the app does about it, since the cause is unknown:
 
