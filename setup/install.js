@@ -39,6 +39,30 @@ function readJson(file) {
   return JSON.parse(raw); // throw loudly rather than clobber a file we can't parse
 }
 
+// "Not there" and "this process cannot see it" look identical to existsSync,
+// and treating the second as the first is how you silently skip updating a
+// config that very much exists.
+//
+// This is not hypothetical: after electron-updater's quitAndInstall, the
+// relaunched process has been observed computing the right path to
+// %APPDATA%\Claude\claude_desktop_config.json and still failing to read it,
+// while a normally-launched copy reads it fine. The NSIS path goes through
+// elevate.exe, so the new process is not necessarily the same token.
+function probe(file) {
+  if (fs.existsSync(file)) return { state: 'present' };
+  try {
+    fs.readdirSync(HOME); // can this process see the profile at all?
+  } catch (err) {
+    return { state: 'unreadable', code: err.code };
+  }
+  try {
+    fs.readdirSync(path.dirname(file));
+    return { state: 'absent' };
+  } catch (err) {
+    return err.code === 'ENOENT' ? { state: 'absent' } : { state: 'unreadable', code: err.code };
+  }
+}
+
 function makeBackupDir() {
   return path.join(DB_DIR, 'config-backups', new Date().toISOString().replace(/[:.]/g, '-'));
 }
@@ -58,6 +82,14 @@ function writeJson(file, data, state) {
 /* ------------------------------------------------------------------- targets */
 
 function mcpServers(file, label, { create, remove, entry }, state) {
+  const seen = probe(file);
+  if (seen.state === 'unreadable') {
+    state.problems.push(
+      `${label}: could not read ${file} from this process (${seen.code}) — left untouched. Restart Claude Boardroom and try again.`
+    );
+    return;
+  }
+
   let cfg;
   try {
     cfg = readJson(file);
@@ -220,13 +252,23 @@ function status(ctx = {}) {
   };
 
   const mcpState = (file, { needsFile }) => {
+    const seen = probe(file);
+    if (seen.state === 'unreadable') {
+      return {
+        ok: false,
+        unreadable: true,
+        detail: `couldn't be read from this process (${seen.code}) — restart Claude Boardroom`,
+        path: file,
+      };
+    }
+
     const { cfg, error } = readSafe(file);
     if (error) return { ok: false, detail: `config is not valid JSON: ${error}`, path: file };
     if (cfg === null) {
       return {
         ok: false,
         missing: true,
-        detail: needsFile ? 'config file not found — is this app installed?' : 'not set up yet',
+        detail: needsFile ? 'Claude Desktop not installed' : 'not set up yet',
         path: file,
       };
     }

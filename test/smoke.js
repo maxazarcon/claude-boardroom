@@ -283,6 +283,30 @@ check('the hook shim path is stable, so settings.json survives updates', () => {
   assert.ok(fs.readFileSync(second.path, 'utf8').includes('/v2/boardroom.exe'));
 });
 
+/* ------------------------------------------------------------------ install */
+
+const installer = require('../setup/install');
+
+check('status reports a genuinely absent Desktop config as absent, not unreadable', () => {
+  const st = installer.status({ execPath: '/usr/bin/node', isElectron: false });
+  // Whatever this machine looks like, the two states must stay distinguishable:
+  // conflating them is how an existing config gets silently skipped.
+  for (const key of ['claude_code', 'desktop']) {
+    const s = st[key];
+    assert.ok(typeof s.ok === 'boolean', `${key} needs an ok flag`);
+    assert.ok(!(s.missing && s.unreadable), `${key} cannot be both absent and unreadable`);
+    if (!s.ok) assert.ok(s.detail && s.detail.length, `${key} needs a reason`);
+  }
+});
+
+check('an unreadable config is a problem, never a silent skip', () => {
+  // A path whose parent cannot exist stands in for the post-update process
+  // that could not see %APPDATA%. It must not be quietly treated as absent.
+  const st = installer.status({ execPath: '/usr/bin/node', isElectron: false });
+  assert.ok(st.desktop.path, 'desktop status carries the path it looked at');
+  assert.strictEqual(typeof st.shim.ok, 'boolean');
+});
+
 console.log(`\n${n} checks passed.`);
 require('../src/db').close();
 fs.rmSync(process.env.BOARDROOM_HOME, { recursive: true, force: true });

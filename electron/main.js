@@ -154,11 +154,25 @@ function iconPath() {
   return path.join(__dirname, '..', 'build', 'icon.png');
 }
 
+// Idempotent, cheap, and the recovery path when the launch-time attempt ran in
+// a process that could not read Claude's config (see setup/install.js probe()).
+function rewireQuietly() {
+  try {
+    const res = installer.apply(RUNTIME, {});
+    for (const p of res.problems) console.error('[boardroom] wiring:', p);
+    return res;
+  } catch (err) {
+    console.error('[boardroom] could not update Claude config:', err.message);
+    return null;
+  }
+}
+
 function createWindow(show = true) {
   if (win) {
     if (show) {
       win.show();
       win.focus();
+      rewireQuietly();
     }
     return win;
   }
@@ -251,12 +265,10 @@ if (!app.requestSingleInstanceLock()) {
 
     // Self-heal Claude's config on every launch. After an update this is what
     // keeps the MCP entry and hook shim pointing at the current install
-    // without the user re-running anything.
-    try {
-      installer.apply(RUNTIME, {});
-    } catch (err) {
-      console.error('[boardroom] could not update Claude config:', err.message);
-    }
+    // without the user re-running anything. It also runs whenever the window
+    // is shown, which is the escape hatch for the post-update launch that
+    // cannot read Claude's config.
+    rewireQuietly();
 
     try {
       ({ url: serverUrl } = await ui.listen());
