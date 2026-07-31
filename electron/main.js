@@ -193,7 +193,40 @@ const RETRY_DELAYS = [3000, 8000, 20000, 45000, 90000];
 let retryTimer = null;
 let retriesLeft = RETRY_DELAYS.length;
 
-const wiringHealth = { settled: false, attempts: 0, lastProblems: [], diagnosis: null };
+const wiringHealth = {
+  settled: false,
+  attempts: 0,
+  lastProblems: [],
+  diagnosis: null,
+  restarted: false,
+};
+
+// The process electron-updater leaves running after an update gets ENOENT for
+// %APPDATA%\Claude specifically — its parent, C:\Users\<you>\AppData\Roaming,
+// stats fine, and the directory is not a reparse point, is owned by the same
+// user, and is plainly readable from any freshly started process. It does not
+// come back within that process's lifetime; only a new one sees it.
+//
+// So rather than sit there rechecking something that will never change, and
+// rather than show the user a warning about a directory that is demonstrably
+// there, restart ourselves once. It costs a blink right after an update and
+// leaves everything correct.
+const REHOMED = '--boardroom-rehomed';
+let selfHealDone = process.argv.includes(REHOMED);
+
+function selfHealRestart(reason) {
+  if (selfHealDone || !app.isPackaged) return false;
+  // Never interrupt a round-robin mid-flight to fix a cosmetic status row.
+  if (ui.autorunState().active) return false;
+
+  selfHealDone = true;
+  wiringHealth.restarted = true;
+  const args = process.argv.slice(1).filter((a) => a !== '--updated').concat([REHOMED]);
+  console.error(`[boardroom] ${reason} — restarting once to recover`);
+  app.relaunch({ args });
+  app.exit(0);
+  return true;
+}
 
 function rewireQuietly({ scheduleRetries = true } = {}) {
   let res = null;
@@ -218,6 +251,13 @@ function rewireQuietly({ scheduleRetries = true } = {}) {
     retryTimer = null;
     for (const p of res.problems) console.error('[boardroom] wiring:', p);
     return res;
+  }
+
+  // Two checks is enough to tell a momentary blip from the post-update state
+  // that never clears. Past that, a restart is the only thing that helps.
+  if (wiringHealth.attempts >= 2) {
+    const where = wiringHealth.diagnosis ? wiringHealth.diagnosis.firstMissing : 'a Claude config';
+    if (selfHealRestart(`${where} still invisible after ${wiringHealth.attempts} checks`)) return res;
   }
 
   if (scheduleRetries && retriesLeft > 0) {
