@@ -519,6 +519,32 @@ base64 of a `.pfx`) and `CSC_KEY_PASSWORD` before `npm run release`;
 electron-builder picks them up with no config change. Signed builds also make
 auto-update quieter, since the updater verifies signatures on Windows.
 
+### Known: the process relaunched after an update can be half-blind
+
+Reproducible, mechanism not established. The process electron-updater
+relaunches after installing an update — the one whose command line carries
+`--updated` — gets `ENOENT` for the whole of `%APPDATA%\Claude`, so the Claude
+Desktop config looks like it isn't there. Same user, same computed path, the
+directory plainly on disk, and the *same binary* launched normally reads it
+fine. Two plausible explanations were tested and ruled out: it is not a token
+or profile mismatch (`GetOwner` and `os.homedir()` both check out), and it is
+not a locked or unreadable file (a directory listing does not show it either).
+
+What the app does about it, since the cause is unknown:
+
+- it records every config it has successfully read, so a later "absent" is
+  reported as *"was readable before but not from this process"* rather than
+  "Claude Desktop not installed"
+- in that state it **leaves the file alone** instead of recreating it, which is
+  what would otherwise throw away your Desktop preferences
+- it re-applies the wiring whenever the window is shown, and on the next normal
+  launch, so the condition clears by itself
+
+Practical effect: after an update, the Claude Desktop row may show that warning
+until you next start the app normally. Claude Code and the hook are unaffected,
+and nothing is lost either way — the install path does not change between
+updates, so the existing config stays correct throughout.
+
 ### Schema changes
 
 `src/db.js` holds an ordered `MIGRATIONS` array tracked in `PRAGMA
