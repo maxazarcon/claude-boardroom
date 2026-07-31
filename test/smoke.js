@@ -342,6 +342,27 @@ check('round-robin refuses to start with nobody it can drive', () => {
   assert.match(r.message, /no folder/);
 });
 
+check('a config never seen before is not treated as a blip', () => {
+  // Only a config we have successfully read counts as "transient" when it
+  // disappears. Otherwise a machine without Claude Desktop would recheck for
+  // ever instead of saying plainly that it is not installed.
+  const st = installer.status({ execPath: '/usr/bin/node', isElectron: false });
+  for (const s of [st.claude_code, st.desktop]) {
+    if (s.missing) assert.ok(!s.transient, 'an unseen config must not be marked transient');
+    if (s.transient) assert.ok(s.diagnosis, 'a transient verdict must carry its diagnosis');
+  }
+});
+
+check('a diagnosis pinpoints the first path level that fails', () => {
+  const st = installer.status({ execPath: '/usr/bin/node', isElectron: false });
+  const bad = [st.claude_code, st.desktop].find((s) => s.diagnosis);
+  if (!bad) return; // nothing wrong on this machine, nothing to assert
+  const d = bad.diagnosis;
+  assert.ok(Array.isArray(d.chain) && d.chain.length, 'diagnosis walks the path');
+  assert.ok('firstMissing' in d, 'diagnosis names where it broke');
+  assert.ok(d.home, 'diagnosis records the home it resolved');
+});
+
 check('stopping a round-robin that is not running is harmless', () => {
   const r = ui.stopAutorun();
   assert.strictEqual(r.status, 'ok');

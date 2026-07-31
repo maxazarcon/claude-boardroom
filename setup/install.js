@@ -57,6 +57,42 @@ function readJson(file) {
 // launched copy reads it fine. So do not ask existsSync. Try to read the file,
 // and when that fails, ask the directory whether the name is there: a listing
 // that contains it settles the question no matter what stat claims.
+// Walks the path one level at a time and reports the first that fails. When a
+// file is mysteriously invisible this says whether it is the file, its folder,
+// or something further up — which is the question guesswork kept getting wrong.
+function diagnose(file) {
+  const chain = [];
+  let cur = path.parse(file).root;
+  for (const seg of path.relative(cur, file).split(path.sep)) {
+    cur = path.join(cur, seg);
+    try {
+      const st = fs.statSync(cur);
+      chain.push({ path: cur, ok: true, dir: st.isDirectory() });
+    } catch (err) {
+      chain.push({ path: cur, ok: false, code: err.code });
+      break; // everything below this is moot
+    }
+  }
+
+  const parent = path.dirname(file);
+  let siblings = null;
+  try {
+    siblings = fs.readdirSync(parent).length;
+  } catch {
+    /* parent not listable */
+  }
+
+  return {
+    chain,
+    firstMissing: (chain.find((c) => !c.ok) || {}).path || null,
+    code: (chain.find((c) => !c.ok) || {}).code || null,
+    parentEntries: siblings,
+    appdata: process.env.APPDATA || null,
+    home: HOME,
+    pid: process.pid,
+  };
+}
+
 function probe(file) {
   try {
     fs.readFileSync(file);
@@ -319,8 +355,12 @@ function status(ctx = {}) {
       return {
         ok: false,
         unreadable: true,
+        transient: seenBefore(file),
         code: seen.code,
-        detail: `on disk but unreadable from this process (${seen.code}) — restart Claude Boardroom`,
+        detail: seenBefore(file)
+          ? 'rechecking — it was readable a moment ago'
+          : `on disk but unreadable from this process (${seen.code})`,
+        diagnosis: diagnose(file),
         path: file,
       };
     }
@@ -334,7 +374,9 @@ function status(ctx = {}) {
         return {
           ok: false,
           unreadable: true,
-          detail: 'was readable before but not from this process — restart Claude Boardroom',
+          transient: true,
+          detail: 'rechecking — it was readable a moment ago',
+          diagnosis: diagnose(file),
           path: file,
         };
       }

@@ -98,6 +98,7 @@ const bridge = {
       db_path: DB_PATH,
       auto_start: app.getLoginItemSettings().openAtLogin,
       update: { ...updateState },
+      wiring_health: { ...wiringHealth },
     };
   },
 
@@ -183,17 +184,59 @@ function iconPath() {
   return path.join(__dirname, '..', 'build', 'icon.png');
 }
 
-// Idempotent, cheap, and the recovery path when the launch-time attempt ran in
-// a process that could not read Claude's config (see setup/install.js probe()).
-function rewireQuietly() {
+// Right after an update, a config Claude Boardroom has read many times before
+// can come back ENOENT for a while and then start working again on its own.
+// Rather than show that to the user as a problem they cannot act on, retry
+// quietly on a backoff and only give up — and only then say anything — once it
+// has clearly stopped being a blip.
+const RETRY_DELAYS = [3000, 8000, 20000, 45000, 90000];
+let retryTimer = null;
+let retriesLeft = RETRY_DELAYS.length;
+
+const wiringHealth = { settled: false, attempts: 0, lastProblems: [], diagnosis: null };
+
+function rewireQuietly({ scheduleRetries = true } = {}) {
+  let res = null;
   try {
-    const res = installer.apply(RUNTIME, {});
-    for (const p of res.problems) console.error('[boardroom] wiring:', p);
-    return res;
+    res = installer.apply(RUNTIME, {});
   } catch (err) {
     console.error('[boardroom] could not update Claude config:', err.message);
     return null;
   }
+
+  wiringHealth.attempts++;
+  wiringHealth.lastProblems = res.problems;
+
+  // Anything transient is worth another look before bothering anyone.
+  const st = installer.status(RUNTIME);
+  const shaky = [st.claude_code, st.desktop, st.hook].filter((s) => s && s.transient);
+  wiringHealth.diagnosis = shaky.length ? shaky[0].diagnosis : null;
+
+  if (!shaky.length) {
+    wiringHealth.settled = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    for (const p of res.problems) console.error('[boardroom] wiring:', p);
+    return res;
+  }
+
+  if (scheduleRetries && retriesLeft > 0) {
+    const delay = RETRY_DELAYS[RETRY_DELAYS.length - retriesLeft];
+    retriesLeft--;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => rewireQuietly(), delay);
+    console.error(
+      `[boardroom] a Claude config was briefly unreadable; rechecking in ${delay / 1000}s ` +
+        `(${retriesLeft} attempts left). First missing: ${
+          wiringHealth.diagnosis ? wiringHealth.diagnosis.firstMissing : 'unknown'
+        }`
+    );
+  } else {
+    // Out of retries: this is no longer a blip, so let it surface.
+    wiringHealth.settled = true;
+    console.error('[boardroom] config still unreadable after retries:', JSON.stringify(wiringHealth.diagnosis));
+  }
+  return res;
 }
 
 function createWindow(show = true) {

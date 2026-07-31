@@ -566,17 +566,29 @@ function renderWiring() {
   wiringSig = sig;
   const w = wiring;
 
-  const row = (label, s, note) => `
+  // A config that was readable a moment ago and now isn't is treated as a blip
+  // while the app is still rechecking, not as something to alarm you about.
+  const health = (appInfo && appInfo.wiring_health) || {};
+  const pending = (s) => s && s.transient && !health.settled;
+
+  const row = (label, s, note) => {
+    const wait = pending(s);
+    const mark = s.ok ? '✓' : wait ? '⋯' : '!';
+    return `
     <div class="row" style="justify-content:space-between; padding:5px 0">
       <div>
-        <span class="tag ${s.ok ? 'ok' : 'no'}">${s.ok ? '✓' : '!'}</span>
+        <span class="tag ${s.ok ? 'ok' : 'no'}">${mark}</span>
         <span style="margin-left:6px">${esc(label)}</span>
         <span class="small muted" style="margin-left:8px">${esc(s.detail || '')}</span>
       </div>
       ${note ? `<span class="small muted">${note}</span>` : ''}
     </div>`;
+  };
 
-  const allOk = w.claude_code.ok && w.hook.ok && (w.desktop.ok || w.desktop.missing);
+  const settledBad = (s) => s && !s.ok && !pending(s);
+  const anyPending = pending(w.claude_code) || pending(w.desktop) || pending(w.hook);
+  const needsHand = settledBad(w.claude_code) || settledBad(w.hook) ||
+    (settledBad(w.desktop) && !w.desktop.missing);
   const auto = w.auto_register;
 
   paint($('wiring'), `
@@ -585,10 +597,13 @@ function renderWiring() {
     ${row('Auto-poll hook', w.hook)}
     ${row('Claude Desktop', w.desktop, w.desktop.ok ? 'restart Desktop to pick it up' : '')}
     <div class="row" style="margin-top:8px">
-      <button id="rewire">${allOk ? 'Re-apply setup' : 'Fix setup'}</button>
-      <span class="small muted">${allOk
-        ? 'Kept current automatically on every launch — this just does it now.'
-        : 'One click writes the missing config.'}</span>
+      <button id="rewire">${needsHand ? 'Fix setup' : 'Re-apply setup'}</button>
+      <span class="small muted">${
+        anyPending
+          ? 'A config went briefly unreadable — the app is rechecking it, no action needed.'
+          : needsHand
+            ? 'One click writes the missing config.'
+            : 'Kept current automatically on every launch — this just does it now.'}</span>
     </div>
     <div class="small muted" style="margin-top:6px">
       Auto-registration is
