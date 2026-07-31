@@ -16,7 +16,7 @@
     "install-wiring": "node setup/install.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --publish never",
-    "release": "electron-builder --publish always"
+    "release": "node setup/release.js"
   },
   "engines": {
     "node": ">=22.13"

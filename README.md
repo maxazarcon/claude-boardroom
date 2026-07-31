@@ -470,13 +470,27 @@ on who has actually connected.
 Releases are built and published with electron-builder:
 
 ```bash
-npm version patch          # or minor / major
-npm run release            # builds, then publishes to GitHub Releases
+npm version patch          # or minor / major — commits and tags
+npm run release            # pushes, creates the release, builds, uploads
 ```
 
-`npm run release` needs a `GH_TOKEN` in the environment with `repo` scope. It
-uploads the installer plus `latest.yml`, which is the feed installed copies
-poll. Tag and release notes come from the version in `package.json`.
+`npm run release` uses your `gh` login, or `GH_TOKEN` with `repo` scope. It
+refuses to publish a dirty tree or an untagged version, and fails loudly if
+`latest.yml` — the feed installed copies poll — did not make it up.
+
+It creates the GitHub release *before* invoking electron-builder on purpose.
+Left to itself, electron-builder uploads the installer and the blockmap
+concurrently, and each upload independently decides the release doesn't exist
+and creates one, leaving two releases per tag: one with the installer and feed,
+one with only a blockmap. Creating the release up front removes that race.
+
+Two other things worth knowing:
+
+- electron-builder **drafts** releases by default, and installed copies cannot
+  see a draft. `releaseType: release` in `electron-builder.yml` overrides that.
+- If you ever upload an asset by hand, keep the filename electron-builder used
+  (hyphens, not spaces) — `gh` rewrites spaces to dots and the updater then
+  cannot find the blockmap it was promised.
 
 To check a build without publishing:
 
