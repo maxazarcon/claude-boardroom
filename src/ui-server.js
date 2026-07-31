@@ -150,8 +150,12 @@ function beginTurn({ name }) {
     );
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
+      const combined = `${stdout}\n${stderr}`;
+      // A turn that failed only because the CLI is not signed in is not a
+      // boardroom error, and saying "exit 1" helps nobody.
+      const authRequired = code !== 0 && wiring.looksLikeAuthFailure(combined);
       resolve({
-        status: code === 0 ? 'ok' : 'error',
+        status: authRequired ? 'auth_required' : code === 0 ? 'ok' : 'error',
         name,
         folder_path: p.folder_path,
         permission_mode: mode,
@@ -162,6 +166,9 @@ function beginTurn({ name }) {
         seconds: Math.round((Date.now() - started) / 1000),
         stdout: stdout.trim(),
         stderr: stderr.trim(),
+        message: authRequired
+          ? 'The Claude Code CLI is not signed in, so the turn could not run. This is a one-time login, separate from Claude Desktop.'
+          : undefined,
       });
     });
   });
@@ -243,6 +250,183 @@ function writeMcpJson({ folder }) {
     file,
     message: `Wrote ${file}. The next Claude Code session started in that folder picks it up (and will ask you to approve the project server once).`,
   };
+}
+
+/* ------------------------------------------------------------------- auto-run */
+
+// Drives a discussion round-robin: gives each participant its speaking turn in
+// order, then collects votes, then follows the round the server opens next.
+//
+// Every step here spawns a real headless Claude run that spends quota and can
+// edit files, so this is bounded on every axis and stops rather than guesses:
+// one turn at a time, a hard ceiling on total turns, and it halts on anything
+// it does not understand instead of retrying forever.
+const autorun = {
+  active: false,
+  room: null,
+  step: 'idle',
+  detail: null,
+  log: [],
+  turns: 0,
+  maxTurns: 0,
+  stopRequested: false,
+  lastResult: null,
+};
+
+const MAX_ROUNDS = 6;
+const STALL_RETRIES = 1;
+
+function autorunState() {
+  return {
+    active: autorun.active,
+    room: autorun.room,
+    step: autorun.step,
+    detail: autorun.detail,
+    turns: autorun.turns,
+    max_turns: autorun.maxTurns,
+    log: autorun.log.slice(-12),
+  };
+}
+
+function note(step, detail) {
+  autorun.step = step;
+  autorun.detail = detail;
+  autorun.log.push({ at: new Date().toISOString(), step, detail });
+  if (autorun.log.length > 200) autorun.log = autorun.log.slice(-100);
+}
+
+function halt(step, detail) {
+  note(step, detail);
+  autorun.active = false;
+  autorun.room = null;
+}
+
+function startAutorun({ room }) {
+  if (autorun.active) {
+    return { status: 'error', message: `already running for "${autorun.room}"` };
+  }
+  if (!room) return { status: 'error', message: 'room is required' };
+
+  const d = core.discussionStatus({ room });
+  if (!d.active) {
+    return { status: 'error', message: 'no discussion is running in that room' };
+  }
+
+  const drivable = d.order.filter((n) => {
+    const p = core.participant(n);
+    return p && p.folder_path;
+  });
+  if (!drivable.length) {
+    return {
+      status: 'error',
+      message:
+        'none of the participants in this discussion can be driven — they have no folder to run a turn in',
+    };
+  }
+
+  autorun.active = true;
+  autorun.room = room;
+  autorun.stopRequested = false;
+  autorun.turns = 0;
+  autorun.log = [];
+  // Speaking turn + vote per participant per round, plus slack.
+  autorun.maxTurns = d.order.length * MAX_ROUNDS * 2 + 4;
+  note('starting', `round ${d.round}, ${d.phase} phase`);
+
+  loop().catch((err) => halt('error', err.message));
+  return { status: 'ok', ...autorunState() };
+}
+
+function stopAutorun() {
+  if (!autorun.active) return { status: 'ok', ...autorunState() };
+  autorun.stopRequested = true;
+  note('stopping', 'will stop after the turn in flight');
+  return { status: 'ok', ...autorunState() };
+}
+
+async function loop() {
+  let stalls = 0;
+
+  while (autorun.active && !autorun.stopRequested) {
+    if (autorun.turns >= autorun.maxTurns) {
+      return halt('stopped', `hit the ${autorun.maxTurns}-turn ceiling without resolving`);
+    }
+
+    const room = autorun.room;
+    const d = core.discussionStatus({ room });
+
+    if (!d.active) {
+      const last = d.rounds && d.rounds[d.rounds.length - 1];
+      return halt(
+        'finished',
+        d.resolved
+          ? `resolved${last ? ` — ${last.yes}/${last.total} agreed in round ${last.round}` : ''}`
+          : 'no discussion is running any more'
+      );
+    }
+    if (d.round > MAX_ROUNDS) {
+      return halt('stopped', `reached round ${d.round} without agreement`);
+    }
+
+    // Who is up: the current speaker, or the first person yet to vote.
+    let who = null;
+    if (d.phase === 'speaking') {
+      who = d.current_speaker;
+    } else if (d.phase === 'voting') {
+      who = d.order.find((n) => {
+        const s = core.discussionStatus({ room, name: n });
+        return s.you && !s.you.has_voted;
+      });
+    }
+    if (!who) {
+      return halt('stopped', `nothing to do in the ${d.phase} phase`);
+    }
+
+    const p = core.participant(who);
+    if (!p || !p.folder_path) {
+      return halt(
+        'waiting',
+        `${who} has no folder to run a turn in — nudge it yourself, then start auto-run again`
+      );
+    }
+
+    const before = JSON.stringify([d.round, d.phase, d.turn_index, d.votes_cast]);
+    note('running', `${who} — ${d.phase === 'speaking' ? `speaking, round ${d.round}` : `voting, round ${d.round}`}`);
+
+    const res = await beginTurn({ name: who });
+    autorun.turns++;
+    autorun.lastResult = { ...res, name: who };
+
+    if (res.status === 'auth_required') {
+      return halt('auth_required', 'the Claude Code CLI is not signed in — log in, then start auto-run again');
+    }
+    if (res.status === 'no_folder' || (res.status === 'error' && !res.exit_code)) {
+      return halt('error', `${who}: ${res.message || 'could not start a turn'}`);
+    }
+
+    const after = core.discussionStatus({ room });
+    const moved = JSON.stringify([after.round, after.phase, after.turn_index, after.votes_cast]) !== before;
+
+    if (moved) {
+      stalls = 0;
+      continue;
+    }
+
+    // The turn ran but the discussion did not move: the participant did not
+    // post on its turn, or did not vote. Retry once, then stop and say so
+    // rather than burning turns on a participant that is not playing along.
+    stalls++;
+    if (stalls > STALL_RETRIES) {
+      return halt(
+        'stalled',
+        `${who} took a turn without ${d.phase === 'speaking' ? 'posting' : 'voting'}. ` +
+          `Stopped so it does not keep retrying — nudge it yourself, or start auto-run again.`
+      );
+    }
+    note('retrying', `${who} did not ${d.phase === 'speaking' ? 'post' : 'vote'} — trying once more`);
+  }
+
+  if (autorun.stopRequested) halt('stopped', 'stopped by you');
 }
 
 /* -------------------------------------------------------------- project setup */
@@ -383,6 +567,7 @@ const server = http.createServer(async (req, res) => {
             })),
             messages: core.roomMessages({ room }),
             discussion: core.discussionStatus({ room }),
+            autorun: autorunState(),
           });
         }
         case '/api/folders':
@@ -405,8 +590,16 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, core.assignRoom(body));
         case '/api/broadcast':
           return json(res, 200, core.broadcast(body));
-        case '/api/discussion':
-          return json(res, 200, core.startDiscussion(body));
+        case '/api/discussion': {
+          const started = core.startDiscussion(body);
+          // Starting the round-robin with the discussion is the normal case —
+          // the moderator sets the topic and order, then it runs itself.
+          if (started.status === 'ok' && body.autorun) {
+            const run = startAutorun({ room: body.room });
+            return json(res, 200, { ...started, autorun: run });
+          }
+          return json(res, 200, started);
+        }
         case '/api/permission-mode':
           return json(res, 200, core.setPermissionMode(body));
         case '/api/forget':
@@ -419,12 +612,17 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, setProjectsDir(body));
         case '/api/add-project':
           return json(res, 200, addProject(body));
+        case '/api/autorun/start':
+          return json(res, 200, startAutorun(body));
+        case '/api/autorun/stop':
+          return json(res, 200, stopAutorun());
 
         // Everything below needs the Electron shell.
         case '/api/pick-folder':
         case '/api/check-update':
         case '/api/install-update':
         case '/api/auto-start':
+        case '/api/open-login':
         case '/api/rewire': {
           if (!BRIDGE) {
             return json(res, 200, {
@@ -437,6 +635,7 @@ const server = http.createServer(async (req, res) => {
             '/api/check-update': 'checkUpdate',
             '/api/install-update': 'installUpdate',
             '/api/auto-start': 'setAutoStart',
+            '/api/open-login': 'openLogin',
             '/api/rewire': 'rewire',
           }[route];
           return json(res, 200, await BRIDGE[fn](body));
@@ -473,6 +672,9 @@ module.exports = {
   findClaudeBinary,
   scanFolders,
   setupInfo,
+  startAutorun,
+  stopAutorun,
+  autorunState,
   server,
   listen,
   setBridge,

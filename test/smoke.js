@@ -307,6 +307,47 @@ check('an unreadable config is a problem, never a silent skip', () => {
   assert.strictEqual(typeof st.shim.ok, 'boolean');
 });
 
+/* --------------------------------------------------- auth + round-robin guards */
+
+check('a not-signed-in CLI is recognised, not reported as a generic failure', () => {
+  const real = 'Not logged in · Please run /login';
+  assert.ok(wiring.looksLikeAuthFailure(real));
+  assert.ok(wiring.looksLikeAuthFailure('Invalid API key'));
+  assert.ok(wiring.looksLikeAuthFailure('OAuth token has expired'));
+  // Ordinary turn output must not be mistaken for an auth problem, or the UI
+  // would send people to log in over and over for unrelated failures.
+  assert.ok(!wiring.looksLikeAuthFailure('I posted my contribution to the room.'));
+  assert.ok(!wiring.looksLikeAuthFailure('Error: file not found'));
+  assert.ok(!wiring.looksLikeAuthFailure(''));
+});
+
+const ui = require('../src/ui-server');
+
+check('round-robin refuses to start without a discussion', () => {
+  core.createRoom({ name: 'quiet' });
+  const r = ui.startAutorun({ room: 'quiet' });
+  assert.strictEqual(r.status, 'error');
+  assert.match(r.message, /no discussion/);
+});
+
+check('round-robin refuses to start with nobody it can drive', () => {
+  core.createRoom({ name: 'desktoponly' });
+  core.register({ name: 'deskA' }); // no cwd
+  core.register({ name: 'deskB' });
+  core.assignRoom({ name: 'deskA', room: 'desktoponly' });
+  core.assignRoom({ name: 'deskB', room: 'desktoponly' });
+  core.startDiscussion({ room: 'desktoponly', prompt: 'p', order: ['deskA', 'deskB'] });
+  const r = ui.startAutorun({ room: 'desktoponly' });
+  assert.strictEqual(r.status, 'error');
+  assert.match(r.message, /no folder/);
+});
+
+check('stopping a round-robin that is not running is harmless', () => {
+  const r = ui.stopAutorun();
+  assert.strictEqual(r.status, 'ok');
+  assert.strictEqual(r.active, false);
+});
+
 console.log(`\n${n} checks passed.`);
 require('../src/db').close();
 fs.rmSync(process.env.BOARDROOM_HOME, { recursive: true, force: true });

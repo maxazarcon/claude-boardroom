@@ -7,10 +7,12 @@
 // The MCP server is deliberately NOT run in here. Claude spawns its own copy
 // per session over stdio; this process just shares the same SQLite file.
 
+const fs = require('node:fs');
 const path = require('node:path');
 const { app, BrowserWindow, Tray, Menu, dialog, shell, nativeImage } = require('electron');
 
 const ui = require('../src/ui-server');
+const wiring = require('../src/wiring');
 const installer = require('../setup/install');
 const { DB_PATH } = require('../src/db');
 
@@ -128,6 +130,33 @@ const bridge = {
     quitting = true;
     setImmediate(() => autoUpdater.quitAndInstall(false, true));
     return { status: 'ok', message: 'Restarting to install…' };
+  },
+
+  // Opens the Claude Code CLI in a terminal so the user can complete the
+  // one-time login it is asking for. We cannot do the OAuth flow for them, so
+  // the most useful thing is to put them in front of it in one click.
+  async openLogin({ folder } = {}) {
+    const ui = require('../src/ui-server');
+    const bin = ui.findClaudeBinary();
+    if (!bin) {
+      return {
+        status: 'error',
+        message: 'Could not find the claude CLI. Install it with: npm install -g @anthropic-ai/claude-code',
+      };
+    }
+    const dir = folder && fs.existsSync(folder) ? folder : app.getPath('home');
+    try {
+      const script = wiring.writeLoginShim(bin, dir);
+      const err = await shell.openPath(script);
+      if (err) return { status: 'error', message: err };
+      return {
+        status: 'ok',
+        message: 'A terminal is opening. Log in there, then come back and run the turn again.',
+        folder: dir,
+      };
+    } catch (err) {
+      return { status: 'error', message: err.message };
+    }
   },
 
   async setAutoStart({ enabled }) {

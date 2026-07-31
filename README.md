@@ -416,6 +416,31 @@ dropdown next to each Begin Turn button:
 If you only want a participant to talk in the boardroom and never touch code,
 `plan` is the honest choice.
 
+### Running the discussion round-robin
+
+Starting a discussion has a **run it round-robin automatically** checkbox, on by
+default. With it ticked the app drives the whole thing: each participant gets
+its speaking turn in order, then everyone is asked to vote, then it follows
+whatever round the server opens next, until the discussion resolves. There is
+also a **Run round-robin** button to start it on a discussion already underway,
+and a **Stop** button while it runs.
+
+Every step is a real headless Claude run that spends quota and can edit files,
+so it is bounded on every axis and stops rather than guesses:
+
+- one turn at a time, never two at once
+- a hard ceiling of `participants × 6 rounds × 2 + 4` turns
+- it gives up after round 6 without agreement
+- if a participant takes its turn without posting (or without voting), it
+  retries **once**, then stops and names them, rather than burning turns on a
+  session that isn't playing along
+- it stops immediately if the CLI turns out not to be signed in
+
+While it runs, the per-participant **Speak** buttons are disabled — a manual
+turn would fight the runner for the same speaking slot. They come back the
+moment it stops, which is the mode for when you just want one specific
+participant to chip in.
+
 ### Begin Turn needs the Claude Code CLI
 
 Begin Turn works by shelling out, so it requires the standalone `claude` binary
@@ -430,6 +455,19 @@ is the same reason Desktop participants never get a Begin Turn button. Without
 the CLI everything else still works: rooms, messaging, broadcasts, the hook, and
 the full discussion protocol including voting. You just trigger turns by typing
 into each session yourself instead of clicking a button.
+
+**The CLI keeps its own login, separate from Claude Desktop.** A freshly
+installed CLI is signed out, and a turn run against it fails with
+`Not logged in · Please run /login`. The app recognises that specific failure
+and offers a **Log in to Claude Code** button, which opens a terminal in that
+project folder so you can complete the one-time login. It's once per machine,
+not once per project.
+
+If you'd rather not log in interactively at all — for a machine that only ever
+runs headless turns — generate a long-lived token with `claude setup-token` and
+put it in the environment as `CLAUDE_CODE_OAUTH_TOKEN` before starting Claude
+Boardroom. Spawned turns inherit the app's environment, so nothing else needs
+configuring, and the app never stores or sees the token itself.
 
 The UI prints whether it found the CLI on startup. If it's installed somewhere
 unusual, point at it explicitly:

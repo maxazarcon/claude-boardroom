@@ -145,6 +145,7 @@ let wiringSig = null;
 let folders = null;
 let turnResult = null;
 let busy = false;
+let autorunPreference = localStorage.getItem('boardroom.autorun') !== '0';
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -249,6 +250,35 @@ function renderSide() {
     });
 }
 
+function autorunPanel() {
+  const a = roomData.autorun || {};
+  const mine = a.active && a.room === selectedRoom;
+  const last = (a.log || [])[a.log.length - 1];
+
+  if (mine) {
+    return `
+      <div class="banner">
+        <div class="row" style="justify-content:space-between">
+          <div><b>Round-robin running</b> — ${esc(a.detail || a.step || '')}</div>
+          <button id="stoprun">Stop</button>
+        </div>
+        <div class="small muted" style="margin-top:4px">
+          Turn ${a.turns} of at most ${a.max_turns}. Each one is a real headless run.
+        </div>
+      </div>`;
+  }
+
+  const stoppedHere = last && !a.active && ['stalled','waiting','auth_required','stopped','error','finished'].includes(a.step);
+  return `
+    ${stoppedHere ? `<div class="banner ${a.step === 'finished' ? 'ok' : 'err'}">
+        Round-robin ${esc(a.step)} — ${esc(a.detail || '')}
+      </div>` : ''}
+    <div class="row" style="margin-bottom:8px">
+      <button class="primary" id="startrun">Run round-robin</button>
+      <span class="small muted">Takes each turn in order, then collects votes, until it resolves.</span>
+    </div>`;
+}
+
 function discussionPanel(d) {
   const assigned = roomData.participants.map((p) => p.name);
 
@@ -263,7 +293,8 @@ function discussionPanel(d) {
         <div style="margin-top:6px">${esc(d.prompt)}</div>
         ${d.rounds.length ? `<div class="small muted" style="margin-top:6px">Completed: ${
           d.rounds.map((r) => `round ${r.round} — ${r.yes}/${r.total} agreed`).join(' · ')}</div>` : ''}
-      </div>`;
+      </div>
+      ${autorunPanel()}`;
   }
 
   const resolvedBanner = d && d.resolved ? `
@@ -282,16 +313,26 @@ function discussionPanel(d) {
       return `<span class="chip ${i >= 0 ? 'sel' : ''}" data-ord="${esc(n)}">${
         i >= 0 ? `${i + 1}. ` : ''}${esc(n)}</span>`;
     }).join('') || '<span class="empty">Nobody assigned to this room yet.</span>'}</div>
-    <div style="margin-top:8px"><button class="primary" id="startd">Start discussion</button></div>`;
+    <div class="row" style="margin-top:8px">
+      <button class="primary" id="startd">Start discussion</button>
+      <label class="small muted" style="display:flex; align-items:center; gap:6px; width:auto">
+        <input type="checkbox" id="autorunbox" style="width:auto" ${autorunPreference ? 'checked' : ''}>
+        run it round-robin automatically
+      </label>
+    </div>`;
 }
 
 function participantRow(p, d) {
   const turn = p.turn || { label: 'Begin Turn', state: 'generic' };
   const inDiscussion = d && d.active && d.order.includes(p.name);
+  const running = roomData.autorun && roomData.autorun.active && roomData.autorun.room === selectedRoom;
+  // While the round-robin is driving, manual turns would fight it for the same
+  // speaking slot. They come back the moment it stops.
+  const disabled = busy || running;
   const btn = p.folder_path
     ? `<button class="${turn.state === 'waiting' ? 'waiting' : turn.state === 'generic' ? '' : 'primary'}"
-         data-turn="${esc(p.name)}" ${busy ? 'disabled' : ''}
-         title="${esc(turn.prompt || '')}">${esc(turn.label)}</button>`
+         data-turn="${esc(p.name)}" ${disabled ? 'disabled' : ''}
+         title="${esc(running ? 'The round-robin is running — stop it to take turns by hand.' : (turn.prompt || ''))}">${esc(turn.label)}</button>`
     : '<span class="tag no" title="No folder_path — nothing to shell out to">read-only</span>';
 
   const modes = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
@@ -365,9 +406,21 @@ function renderRoom() {
         ${turnResult ? `
         <div>
           <h3>Last Begin Turn — ${esc(turnResult.name || '')}</h3>
-          <div class="banner ${turnResult.status === 'ok' ? 'ok' : 'err'}">
-            ${esc(turnResult.message || `exit ${turnResult.exit_code} after ${turnResult.seconds}s · ${turnResult.turn_state} turn · --permission-mode ${turnResult.permission_mode}`)}
-          </div>
+          ${turnResult.status === 'auth_required' ? `
+            <div class="banner err">
+              <b>The Claude Code CLI isn't signed in.</b>
+              <div class="small" style="margin-top:4px">
+                This is a one-time login, and it's separate from Claude Desktop — the CLI
+                keeps its own. Turns can't run until it's done.
+              </div>
+              <div class="row" style="margin-top:8px">
+                <button class="primary" id="dologin" data-folder="${esc(turnResult.folder_path || '')}">Log in to Claude Code</button>
+                <span class="small muted">Opens a terminal. Log in there, then run the turn again.</span>
+              </div>
+            </div>` : `
+            <div class="banner ${turnResult.status === 'ok' ? 'ok' : 'err'}">
+              ${esc(turnResult.message || `exit ${turnResult.exit_code} after ${turnResult.seconds}s · ${turnResult.turn_state} turn · --permission-mode ${turnResult.permission_mode}`)}
+            </div>`}
           ${turnResult.command ? `<pre>${esc(turnResult.command)}</pre>` : ''}
           ${turnResult.stdout ? `<pre>${esc(turnResult.stdout)}</pre>` : ''}
           ${turnResult.stderr ? `<pre class="small">${esc(turnResult.stderr)}</pre>` : ''}
@@ -403,10 +456,32 @@ function renderRoom() {
     const prompt = $('dprompt').value.trim();
     if (!prompt) return alert('Write the issue first.');
     if (!order.length) return alert('Pick a speaking order.');
-    const r = await post('/api/discussion', { room: selectedRoom, prompt, order });
+    autorunPreference = $('autorunbox').checked;
+    localStorage.setItem('boardroom.autorun', autorunPreference ? '1' : '0');
+    const r = await post('/api/discussion', {
+      room: selectedRoom, prompt, order, autorun: autorunPreference,
+    });
     if (r.status !== 'ok') return alert(r.message);
+    if (r.autorun && r.autorun.status === 'error') {
+      alert('Discussion started, but the round-robin could not: ' + r.autorun.message);
+    }
     clearField('dprompt');
     order = [];
+    refreshRoom();
+  };
+
+  const startrun = $('startrun');
+  if (startrun) startrun.onclick = async () => {
+    startrun.disabled = true;
+    const r = await post('/api/autorun/start', { room: selectedRoom });
+    if (r.status !== 'ok') alert(r.message);
+    refreshRoom();
+  };
+
+  const stoprun = $('stoprun');
+  if (stoprun) stoprun.onclick = async () => {
+    stoprun.textContent = 'Stopping…';
+    await post('/api/autorun/stop', {});
     refreshRoom();
   };
 
@@ -428,6 +503,14 @@ function renderRoom() {
     el.onchange = async () => {
       await post('/api/permission-mode', { name: el.dataset.mode, permission_mode: el.value });
     });
+
+  const dologin = $('dologin');
+  if (dologin) dologin.onclick = async () => {
+    dologin.textContent = 'Opening…';
+    const r = await post('/api/open-login', { folder: dologin.dataset.folder });
+    alert(r.message || r.status);
+    dologin.textContent = 'Log in to Claude Code';
+  };
 
   document.querySelectorAll('[data-turn]').forEach((el) =>
     el.onclick = async () => {
