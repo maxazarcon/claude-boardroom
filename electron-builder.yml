@@ -1,0 +1,59 @@
+appId: com.maxazarcon.claude-boardroom
+productName: Claude Boardroom
+copyright: MIT
+
+directories:
+  output: dist
+  buildResources: build
+
+# asar is deliberately off. Claude spawns src/mcp-server.js as its own process
+# using this app's executable as a Node runtime, and a plain file on disk is
+# something any runtime can read — no archive support required.
+asar: false
+
+files:
+  - electron/**
+  - src/**
+  - hooks/**
+  - setup/**
+  - build/icon.*
+  - package.json
+  - '!**/*.map'
+  - '!test/**'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+  # Unsigned: Windows SmartScreen will warn on first run. Signing needs a
+  # certificate; see the README.
+  signAndEditExecutable: true
+
+nsis:
+  # One-click so that auto-updates install silently rather than making the
+  # user click through a wizard every release.
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Claude Boardroom
+  deleteAppDataOnUninstall: false
+  # The boardroom database lives in ~/.claude-boardroom and is intentionally
+  # left behind on uninstall — it is the user's data, not ours.
+
+mac:
+  target: [dmg]
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+
+linux:
+  target: [AppImage]
+  icon: build/icon.png
+  category: Development
+
+publish:
+  provider: github
+  owner: maxazarcon
+  repo: claude-boardroom

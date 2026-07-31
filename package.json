@@ -1,0 +1,37 @@
+{
+  "name": "claude-boardroom",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local MCP server that lets separate Claude conversations talk to each other through a shared SQLite notepad, plus a moderator UI.",
+  "main": "electron/main.js",
+  "type": "commonjs",
+  "bin": {
+    "claude-boardroom": "src/mcp-server.js"
+  },
+  "scripts": {
+    "start": "electron .",
+    "ui": "node src/ui-server.js",
+    "mcp": "node src/mcp-server.js",
+    "test": "node test/smoke.js",
+    "install-wiring": "node setup/install.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --publish never",
+    "release": "electron-builder --publish always"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maxazarcon/claude-boardroom.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# Local Claude Code state, not part of the project
+.claude/settings.local.json
