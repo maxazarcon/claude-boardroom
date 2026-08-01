@@ -61,8 +61,13 @@ function autoRegister(cwd) {
 
 function render(name, res) {
   const lines = [];
+  const me = core.participant(name);
   lines.push('=== Claude Boardroom ===');
   lines.push(`You are participant "${name}".`);
+  if (me && me.role) {
+    lines.push(`Your role on this board: ${me.role}`);
+    lines.push('Read the room in light of that role — it is why you are here.');
+  }
 
   if (res.status === 'pending') {
     lines.push(
@@ -81,14 +86,49 @@ function render(name, res) {
     );
     lines.push('');
     for (const m of res.messages) {
-      const who =
+      let who =
         m.kind === 'moderator'
-          ? `MODERATOR (${m.sender})`
+          ? 'MODERATOR'
           : m.kind === 'system'
             ? 'SYSTEM'
             : m.sender;
+      if (m.aside_with) {
+        who += ' (PRIVATE, just you and the moderator)';
+      } else if (m.addressed_to) {
+        who += m.addressed_to === name ? ' → TO YOU' : ` → to ${m.addressed_to}`;
+      }
       lines.push(`[#${m.id}] ${who}: ${m.body}`);
     }
+  }
+
+  // A direct address is the point of the turn when there is one.
+  const addressed = res.room ? core.outstandingAddress({ room: res.room, name }) : null;
+  if (addressed) {
+    lines.push('');
+    lines.push(
+      `>>> THE MODERATOR ADDRESSED YOU DIRECTLY (message #${addressed.id}). Answer it with ` +
+        `post_message. The whole room sees the question and your answer.`
+    );
+  } else {
+    const other = (res.messages || [])
+      .filter((m) => m.addressed_to && m.addressed_to !== name)
+      .pop();
+    if (other) {
+      lines.push('');
+      lines.push(
+        `>>> The moderator addressed ${other.addressed_to}, not you. Read along, but let ` +
+          `them answer — do not post on their behalf.`
+      );
+    }
+  }
+
+  if ((res.messages || []).some((m) => m.aside_with === name)) {
+    lines.push('');
+    lines.push(
+      '>>> Some of the above is a private aside between you and the moderator. To reply ' +
+        'privately, call post_message with private set to true — that goes only to the ' +
+        'moderator. A normal post_message goes to the whole room.'
+    );
   }
 
   const d = res.discussion;

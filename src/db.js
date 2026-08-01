@@ -103,6 +103,24 @@ const MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS idx_discussions_room ON discussions (room, id);
     `);
   },
+
+  // v2 — roles, direct address, and private asides.
+  //
+  // Additive on purpose: during an app update a Claude session may still be
+  // holding an older MCP server process open against this same file, and it
+  // must keep working against the new schema.
+  function v2(db) {
+    db.exec(`
+      ALTER TABLE participants ADD COLUMN role TEXT;
+      -- A moderator message aimed at one participant. Everyone sees it; only
+      -- the addressee is asked to act on it.
+      ALTER TABLE messages ADD COLUMN addressed_to TEXT;
+      -- A message in the private channel between the moderator and one
+      -- participant. Nobody else ever reads it.
+      ALTER TABLE messages ADD COLUMN aside_with TEXT;
+      CREATE INDEX IF NOT EXISTS idx_messages_aside ON messages (room, aside_with, id);
+    `);
+  },
 ];
 
 function migrate(db) {

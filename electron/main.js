@@ -160,6 +160,23 @@ const bridge = {
     }
   },
 
+  // Quitting from the tray and relaunching from the Start menu is a silly
+  // amount of ceremony for something the app can do itself.
+  async restart() {
+    if (ui.autorunState().active) {
+      return {
+        status: 'error',
+        message: 'A round-robin is running. Stop it first, or its turn in flight would be lost.',
+      };
+    }
+    quitting = true;
+    setImmediate(() => {
+      app.relaunch({ args: process.argv.slice(1).filter((a) => a !== '--updated') });
+      app.exit(0);
+    });
+    return { status: 'ok', message: 'Restarting…' };
+  },
+
   async setAutoStart({ enabled }) {
     app.setLoginItemSettings({ openAtLogin: Boolean(enabled), args: ['--hidden'] });
     refreshTray();
@@ -319,6 +336,15 @@ function refreshTray() {
         type: 'checkbox',
         checked: openAtLogin,
         click: (item) => bridge.setAutoStart({ enabled: item.checked }),
+      },
+      {
+        label: 'Restart Claude Boardroom',
+        click: async () => {
+          const r = await bridge.restart();
+          if (r.status !== 'ok') {
+            dialog.showMessageBox({ type: 'info', message: r.message, buttons: ['OK'] });
+          }
+        },
       },
       { type: 'separator' },
       {

@@ -252,6 +252,66 @@ check('permission mode is per participant and validated', () => {
   assert.strictEqual(core.setPermissionMode({ name: 'alice', permission_mode: 'yolo' }).status, 'error');
 });
 
+/* -------------------------------------------- roles, address, private asides */
+
+core.createRoom({ name: 'aside-lab' });
+core.register({ name: 'ra', cwd: '/tmp/ra', role: 'API owner' });
+core.register({ name: 'rb', cwd: '/tmp/rb' });
+core.register({ name: 'rc', cwd: '/tmp/rc' });
+for (const nm of ['ra', 'rb', 'rc']) {
+  core.assignRoom({ name: nm, room: 'aside-lab' });
+  core.getMessages({ name: nm }); // drain the join notices
+}
+core.broadcast({ room: 'aside-lab', body: 'public notice' });
+core.broadcast({ room: 'aside-lab', body: 'ra, what is the risk?', to: 'ra' });
+core.broadcast({ room: 'aside-lab', body: 'between us: rb is behind', aside: 'rb' });
+
+const bodiesFor = (nm) => core.getMessages({ name: nm }).messages.map((m) => m.body);
+const raSaw = bodiesFor('ra');
+const rbSaw = bodiesFor('rb');
+const rcSaw = bodiesFor('rc');
+
+check('an aside reaches only its participant', () => {
+  assert.ok(rbSaw.includes('between us: rb is behind'));
+  assert.ok(!raSaw.includes('between us: rb is behind'));
+  assert.ok(!rcSaw.includes('between us: rb is behind'));
+});
+
+check('an addressed message is visible to the whole room', () => {
+  for (const saw of [raSaw, rbSaw, rcSaw]) assert.ok(saw.includes('ra, what is the risk?'));
+});
+
+check('only the addressee is steered to answer', () => {
+  assert.ok(core.outstandingAddress({ room: 'aside-lab', name: 'ra' }));
+  assert.strictEqual(core.outstandingAddress({ room: 'aside-lab', name: 'rc' }), null);
+  assert.strictEqual(core.turnPrompt(null, { addressed: true }).state, 'addressed');
+  assert.strictEqual(core.turnPrompt(null, { addressed: false }).state, 'generic');
+});
+
+check('answering clears the address', () => {
+  core.postMessage({ name: 'ra', body: 'schema drift' });
+  assert.strictEqual(core.outstandingAddress({ room: 'aside-lab', name: 'ra' }), null);
+});
+
+check('a private reply stays private and never advances a turn', () => {
+  core.startDiscussion({ room: 'aside-lab', prompt: 'ship?', order: ['ra', 'rb', 'rc'] });
+  const before = core.discussionStatus({ room: 'aside-lab' }).turn_index;
+  const r = core.postMessage({ name: 'ra', body: 'quietly: I disagree', private: true });
+  assert.strictEqual(r.private, true);
+  assert.strictEqual(core.discussionStatus({ room: 'aside-lab' }).turn_index, before);
+  assert.ok(!core.roomMessages({ room: 'aside-lab' }).some((m) => m.body === 'quietly: I disagree'));
+  assert.ok(!bodiesFor('rb').includes('quietly: I disagree'));
+});
+
+check('roles round-trip and reach the roster', () => {
+  assert.strictEqual(
+    core.listParticipants({ room: 'aside-lab' }).participants.find((p) => p.name === 'ra').role,
+    'API owner'
+  );
+  core.setRole({ name: 'rb', role: 'client integrator' });
+  assert.strictEqual(core.participant('rb').role, 'client integrator');
+});
+
 /* ------------------------------------------------------------------- wiring */
 
 const wiring = require('../src/wiring');

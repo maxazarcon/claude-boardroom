@@ -73,16 +73,45 @@
   .stack > * + * { margin-top: 10px; }
   .p-name { font-weight: 600; }
   .empty { color: var(--dim); font-style: italic; padding: 6px 0; }
+  nav { display: flex; gap: 4px; }
+  .navbtn { background: transparent; border: 1px solid transparent; color: var(--dim);
+            padding: 4px 12px; border-radius: 6px; }
+  .navbtn:hover { color: var(--fg); border-color: var(--line); }
+  .navbtn.on { background: var(--panel2); border-color: var(--line); color: var(--fg); font-weight: 600; }
+  .view { display: none; }
+  .view.on { display: block; }
+  main.view.on { display: grid; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel); }
+  .card h4 { margin: 0 0 6px; font-size: 14px; }
+  .card.click { cursor: pointer; }
+  .card.click:hover { border-color: var(--accent); }
+  .kv { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); padding: 2px 0; }
+  .aside-feed { max-height: 30vh; overflow-y: auto; border: 1px solid var(--line);
+                border-radius: 8px; padding: 8px; background: #12141a; }
+  .msg.aside { border-left-color: #8f7ad8; background: #17141f; }
+  .msg.aside .who { color: #a58ae8; }
+  .addressed { outline: 1px solid var(--accent); }
+  label.inline { display: flex; align-items: center; gap: 6px; width: auto; font-size: 12px; color: var(--dim); }
 </style>
 </head>
 <body>
 <header>
   <h1>Claude Boardroom</h1>
-  <span class="db" id="dbpath"></span>
+  <nav id="nav">
+    <button class="navbtn" data-view="home">Home</button>
+    <button class="navbtn" data-view="rooms">Rooms</button>
+    <button class="navbtn" data-view="roster">Roster</button>
+    <button class="navbtn" data-view="setup">Setup</button>
+  </nav>
   <span style="margin-left:auto" id="appstatus"></span>
 </header>
 
-<main>
+<section id="view-home" class="view pane"></section>
+
+<section id="view-roster" class="view pane"></section>
+
+<main id="view-rooms" class="view">
   <div class="side">
     <section class="pane">
       <h2>Rooms</h2>
@@ -103,34 +132,57 @@
     <section class="pane" id="roompane">
       <div class="empty">Select a room on the left, or create one.</div>
     </section>
-
-    <section class="pane">
-      <details id="setup-details" open>
-        <summary>Setup &amp; projects</summary>
-        <div class="stack" style="margin-top:12px">
-          <div id="wiring"></div>
-
-          <div>
-            <h3>Projects folder</h3>
-            <div class="row">
-              <input id="base" placeholder="C:\Users\you\Projects — your Claude projects folder">
-              <button id="browse" style="display:none">Browse…</button>
-              <button id="usefolder" class="primary">Use this folder</button>
-            </div>
-            <div class="small muted" style="margin-top:6px" id="autoreg"></div>
-          </div>
-
-          <div id="folderlist"></div>
-
-          <details id="manual-details">
-            <summary>Manual config, for another machine</summary>
-            <div class="stack" style="margin-top:12px" id="setup"></div>
-          </details>
-        </div>
-      </details>
-    </section>
   </div>
 </main>
+
+<section id="view-setup" class="view pane">
+  <div class="stack">
+    <div id="wiring"></div>
+
+    <div>
+      <h3>Projects folder</h3>
+      <div class="row">
+        <input id="base" placeholder="C:\Users\you\Projects — your Claude projects folder">
+        <button id="browse" style="display:none">Browse…</button>
+        <button id="usefolder" class="primary">Use this folder</button>
+      </div>
+      <div class="small muted" style="margin-top:6px" id="autoreg"></div>
+    </div>
+
+    <div id="folderlist"></div>
+
+    <div>
+      <h3>Claude Desktop</h3>
+      <div class="small muted">
+        Desktop needs no command line — the config is already written. In any Desktop
+        chat, after a full restart of the app, just say:
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="deskname" placeholder="name for the Desktop participant, e.g. research">
+        <button id="copydesk">Copy the line</button>
+      </div>
+      <pre id="deskline"></pre>
+      <div class="small muted">
+        Desktop conversations have no working directory, so they get no Begin Turn button —
+        you nudge them by typing in the Desktop app.
+      </div>
+    </div>
+
+    <details id="manual-details">
+      <summary>Manual config, for another machine</summary>
+      <div class="stack" style="margin-top:12px" id="setup"></div>
+    </details>
+
+    <div>
+      <h3>App</h3>
+      <div class="small muted" style="margin-bottom:6px">Database: <code id="dbline"></code></div>
+      <div class="row">
+        <button id="restartapp">Restart Claude Boardroom</button>
+        <span class="small muted">Also in the tray menu. Picks up config changes without a trip to the Start menu.</span>
+      </div>
+    </div>
+  </div>
+</section>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -146,6 +198,11 @@ let folders = null;
 let turnResult = null;
 let busy = false;
 let autorunPreference = localStorage.getItem('boardroom.autorun') !== '0';
+let newAgent = {};
+let home = { rooms: {}, turns: 0, lastTurn: null };
+let asideWith = null;      // participant whose private thread is open
+let asideData = null;
+let addressTo = '';        // moderator broadcast target, '' = whole room
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -196,6 +253,212 @@ function clearField(id) {
   delete drafts[id];
   const el = $(id);
   if (el) el.value = '';
+}
+
+/* --------------------------------------------------------------------- views */
+
+let view = localStorage.getItem('boardroom.view') || 'home';
+
+function setView(next) {
+  view = next;
+  localStorage.setItem('boardroom.view', next);
+  for (const el of document.querySelectorAll('.view')) {
+    el.classList.toggle('on', el.id === 'view-' + next);
+  }
+  for (const b of document.querySelectorAll('.navbtn')) {
+    b.classList.toggle('on', b.dataset.view === next);
+  }
+  homeSig = rosterSig = null; // force the newly visible view to draw
+  refreshAll();
+}
+
+/* ---------------------------------------------------------------------- home */
+
+let homeSig = null;
+
+function renderHome() {
+  if (view !== 'home') return;
+  const rooms = state.rooms || [];
+  const waiting = (state.participants || []).filter((p) => !p.room);
+  const sig = JSON.stringify([rooms, state.participants, home, wiring && wiring.auto_register, appInfo && appInfo.version]);
+  if (sig === homeSig) return;
+  homeSig = sig;
+
+  const roomCards = rooms.map((r) => {
+    const d = (home.rooms || {})[r.name] || {};
+    const line = d.active
+      ? `Round ${d.round} · ${d.phase}${d.current_speaker ? ' · ' + esc(d.current_speaker) + ' up' : ''}`
+      : d.resolved ? 'last discussion resolved' : 'no discussion running';
+    return `
+      <div class="card click" data-openroom="${esc(r.name)}">
+        <h4>${esc(r.name)}</h4>
+        <div class="kv"><span>Participants</span><span>${r.participants}</span></div>
+        <div class="kv"><span>Discussion</span><span>${esc(line)}</span></div>
+        <div class="kv"><span>Messages</span><span>${r.last_message_id}</span></div>
+      </div>`;
+  }).join('');
+
+  paint($('view-home'), `
+    <h2>Overview</h2>
+    <div class="cards">
+      ${roomCards || '<div class="empty">No rooms yet — make one in Rooms.</div>'}
+      <div class="card">
+        <h4>Waiting room</h4>
+        ${waiting.length
+          ? `<div class="small">${waiting.map((p) => esc(p.name)).join(', ')}</div>
+             <div class="small muted" style="margin-top:6px">Assign them from Rooms or Roster.</div>`
+          : '<div class="small muted">Nobody waiting.</div>'}
+      </div>
+    </div>
+
+    <h2 style="margin-top:20px">Health</h2>
+    <div class="cards">
+      <div class="card">
+        <h4>Wiring</h4>
+        ${wiring ? `
+          <div class="kv"><span>Claude Code</span><span>${wiring.claude_code.ok ? 'ok' : 'needs attention'}</span></div>
+          <div class="kv"><span>Auto-poll hook</span><span>${wiring.hook.ok ? 'ok' : 'needs attention'}</span></div>
+          <div class="kv"><span>Claude Desktop</span><span>${wiring.desktop.ok ? 'ok' : (wiring.desktop.missing ? 'not installed' : 'needs attention')}</span></div>
+        ` : '<div class="small muted">checking…</div>'}
+        <div style="margin-top:8px"><button data-goto="setup">Open Setup</button></div>
+      </div>
+      <div class="card">
+        <h4>Turns</h4>
+        <div class="kv"><span>Run this session</span><span>${home.turns || 0}</span></div>
+        <div class="kv"><span>Last turn</span><span>${home.lastTurn ? esc(home.lastTurn) : '—'}</span></div>
+        <div class="small muted" style="margin-top:6px">
+          Boardroom-attributable runs only. Subscription usage is not exposed to local apps.
+        </div>
+      </div>
+      <div class="card">
+        <h4>Roster</h4>
+        <div class="kv"><span>On the board</span><span>${(state.participants || []).length}</span></div>
+        <div class="kv"><span>Can take turns</span><span>${(state.participants || []).filter((p) => p.folder_path).length}</span></div>
+        <div style="margin-top:8px"><button data-goto="roster">Open Roster</button></div>
+      </div>
+    </div>`);
+
+  document.querySelectorAll('[data-openroom]').forEach((el) =>
+    el.onclick = () => { selectedRoom = el.dataset.openroom; order = []; setView('rooms'); });
+  document.querySelectorAll('[data-goto]').forEach((el) =>
+    el.onclick = () => setView(el.dataset.goto));
+}
+
+/* -------------------------------------------------------------------- roster */
+
+let rosterSig = null;
+
+function renderRoster() {
+  if (view !== 'roster') return;
+  const ps = state.participants || [];
+  const sig = JSON.stringify([ps, state.rooms, newAgent]);
+  if (sig === rosterSig) return;
+  rosterSig = sig;
+
+  const rows = ps.map((p) => `
+    <li class="item">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <span class="p-name">${esc(p.name)}</span>
+          <span class="tag">${p.room ? esc(p.room) : 'waiting'}</span>
+          ${p.folder_path ? '' : '<span class="tag no">no folder</span>'}
+        </div>
+        <select data-rassign="${esc(p.name)}" style="width:auto">
+          <option value="waiting" ${!p.room ? 'selected' : ''}>waiting room</option>
+          ${(state.rooms || []).map((r) => `<option value="${esc(r.name)}" ${r.name === p.room ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="small muted">${p.folder_path ? esc(p.folder_path) : 'Desktop or registered without a folder'}</div>
+      <div class="row" style="margin-top:6px">
+        <input data-role="${esc(p.name)}" value="${esc(p.role || '')}" placeholder="role on the board — e.g. owns the API schema and guards backwards compatibility">
+        <button data-saverole="${esc(p.name)}">Save</button>
+      </div>
+    </li>`).join('');
+
+  paint($('view-roster'), `
+    <h2>Roster</h2>
+    <div class="small muted" style="margin-bottom:10px">
+      A role is injected into that participant's context on every turn, so it reads the
+      room as the person you hired. Blend it with the discussion yourself — say what they
+      own and what they should push back on, not just a job title.
+    </div>
+    <ul>${rows || '<li class="empty">Nobody on the board yet.</li>'}</ul>
+
+    <h2 style="margin-top:20px">Add a new agent</h2>
+    <div class="small muted" style="margin-bottom:8px">
+      Starts a <b>brand new</b> Claude Code session in a folder and seats it here. It reads
+      its name and role from the boardroom on its first turn, then introduces itself.
+    </div>
+    <div class="stack">
+      <div class="row">
+        <input id="agentfolder" placeholder="folder for the new session" value="${esc(newAgent.folder || '')}">
+        <button id="agentbrowse" ${appInfo && appInfo.shell ? '' : 'style="display:none"'}>Browse…</button>
+      </div>
+      <div class="row">
+        <input id="agentname" placeholder="name on the board, e.g. schema-keeper" value="${esc(newAgent.name || '')}">
+        <select id="agentroom" style="width:auto">
+          <option value="">waiting room</option>
+          ${(state.rooms || []).map((r) => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('')}
+        </select>
+        <select id="agentmode" style="width:auto">
+          ${['plan','default','acceptEdits','bypassPermissions'].map((m) => `<option value="${m}" ${m === 'plan' ? 'selected' : ''}>${m}</option>`).join('')}
+        </select>
+      </div>
+      <textarea id="agentrole" placeholder="what is this agent for? e.g. owns the launcher UI, cares about labelling and tooltips, pushes back on anything that leaks jargon to end users">${esc(newAgent.role || '')}</textarea>
+      <div class="row">
+        <button class="primary" id="createagent">Create agent</button>
+        <span class="small muted">Defaults to <code>plan</code> so a new hire cannot edit files until you say so.</span>
+      </div>
+      <div id="agentresult"></div>
+    </div>`);
+
+  document.querySelectorAll('[data-saverole]').forEach((el) =>
+    el.onclick = async () => {
+      const nm = el.dataset.saverole;
+      const val = document.querySelector(`[data-role="${CSS.escape(nm)}"]`).value;
+      el.textContent = 'Saving…';
+      await post('/api/role', { name: nm, role: val });
+      el.textContent = 'Save';
+      rosterSig = null;
+      refreshAll();
+    });
+
+  document.querySelectorAll('[data-rassign]').forEach((el) =>
+    el.onchange = async () => {
+      await post('/api/assign', { name: el.dataset.rassign, room: el.value });
+      refreshAll();
+    });
+
+  const ab = $('agentbrowse');
+  if (ab) ab.onclick = async () => {
+    const r = await post('/api/pick-folder', {});
+    if (r.status === 'ok') { newAgent.folder = r.path; $('agentfolder').value = r.path; drafts.agentfolder = r.path; }
+  };
+
+  $('createagent').onclick = async () => {
+    const folder = ($('agentfolder').value || '').trim();
+    const name = ($('agentname').value || '').trim();
+    const role = ($('agentrole').value || '').trim();
+    const room = $('agentroom').value || '';
+    const mode = $('agentmode').value;
+    if (!folder || !name) return alert('A folder and a name are needed.');
+
+    const btn = $('createagent');
+    btn.disabled = true;
+    btn.textContent = 'Starting a session…';
+    paint($('agentresult'), '<div class="banner">Running the new session’s first turn. This can take a while.</div>');
+    const r = await post('/api/create-agent', { folder, name, role, room, permission_mode: mode });
+    btn.disabled = false;
+    btn.textContent = 'Create agent';
+    newAgent = {};
+    ['agentfolder', 'agentname', 'agentrole'].forEach(clearField);
+    rosterSig = null;
+    paint($('agentresult'), `
+      <div class="banner ${r.status === 'ok' ? 'ok' : 'err'}">${esc(r.message || r.status)}</div>
+      ${r.stdout ? `<pre>${esc(r.stdout)}</pre>` : ''}
+      ${r.stderr ? `<pre class="small">${esc(r.stderr)}</pre>` : ''}`);
+    refreshAll();
+  };
 }
 
 /* ------------------------------------------------------------------ rendering */
@@ -342,14 +605,19 @@ function participantRow(p, d) {
        </select>` : '';
 
   return `
-    <li class="item">
+    <li class="item ${p.addressed ? 'addressed' : ''}">
       <div class="row" style="justify-content:space-between">
         <div>
           <span class="p-name">${esc(p.name)}</span>
           ${inDiscussion ? `<span class="tag">#${d.order.indexOf(p.name) + 1} in order</span>` : ''}
+          ${p.addressed ? '<span class="tag" style="color:var(--accent)">addressed</span>' : ''}
         </div>
-        <div class="row">${modeSel}${btn}</div>
+        <div class="row">
+          <button class="ghost" data-aside="${esc(p.name)}" title="Private thread with just this participant">Aside${p.aside_count ? ` (${p.aside_count})` : ''}</button>
+          ${modeSel}${btn}
+        </div>
       </div>
+      ${p.role ? `<div class="small" style="color:var(--dim); font-style:italic">${esc(p.role)}</div>` : ''}
       <div class="small muted">${p.folder_path ? esc(p.folder_path) : 'no folder'} · last seen ${time(p.last_seen)}</div>
       <div class="row small" style="margin-top:6px">
         <select data-assign2="${esc(p.name)}" style="width:auto">
@@ -399,10 +667,41 @@ function renderRoom() {
           ${discussionPanel(d)}
         </div>
         <div>
-          <h3>Moderator broadcast</h3>
-          <textarea id="bcast" placeholder="Say something to everyone in this room…"></textarea>
+          <h3>Moderator</h3>
+          <div class="row" style="margin-bottom:6px">
+            <select id="addressto" style="width:auto">
+              <option value="">to the whole room</option>
+              ${roomData.participants.map((p) => `<option value="${esc(p.name)}" ${addressTo === p.name ? 'selected' : ''}>address ${esc(p.name)}</option>`).join('')}
+            </select>
+            <span class="small muted" id="addresshint"></span>
+          </div>
+          <textarea id="bcast" placeholder="Say something to this room…"></textarea>
           <div style="margin-top:6px"><button id="sendbcast">Send as moderator</button></div>
         </div>
+
+        ${asideWith ? `
+        <div>
+          <h3>Private aside — ${esc(asideWith)}</h3>
+          <div class="small muted" style="margin-bottom:6px">
+            Only ${esc(asideWith)} can read this. They see the room and this thread; no other
+            participant sees either side of it.
+          </div>
+          <div class="aside-feed" id="asidefeed">${
+            asideData && asideData.messages.length
+              ? asideData.messages.map((m) => `
+                  <div class="msg aside">
+                    <div class="who">${m.kind === 'moderator' ? 'MODERATOR' : esc(m.sender)}
+                      <span class="meta">#${m.id} · ${time(m.created_at)}</span></div>
+                    <div class="body">${esc(m.body)}</div>
+                  </div>`).join('')
+              : '<div class="empty">Nothing said privately yet.</div>'
+          }</div>
+          <textarea id="asidebox" placeholder="Say something only ${esc(asideWith)} will see…" style="margin-top:6px"></textarea>
+          <div class="row" style="margin-top:6px">
+            <button class="primary" id="sendaside">Send privately</button>
+            <button class="ghost" id="closeaside">Close</button>
+          </div>
+        </div>` : ''}
         ${turnResult ? `
         <div>
           <h3>Last Begin Turn — ${esc(turnResult.name || '')}</h3>
@@ -485,13 +784,47 @@ function renderRoom() {
     refreshRoom();
   };
 
+  const addrSel = $('addressto');
+  const addrHint = $('addresshint');
+  const showHint = () => {
+    addrHint.textContent = addrSel.value
+      ? `Everyone sees it; only ${addrSel.value} is asked to act on it.`
+      : 'Everyone sees it and may act on it.';
+  };
+  showHint();
+  addrSel.onchange = () => { addressTo = addrSel.value; showHint(); };
+
   $('sendbcast').onclick = async () => {
     const body = ($('bcast').value || '').trim();
     if (!body) return;
-    await post('/api/broadcast', { room: selectedRoom, body });
+    const r = await post('/api/broadcast', {
+      room: selectedRoom, body, to: addrSel.value || undefined,
+    });
+    if (r.status !== 'ok') return alert(r.message);
     clearField('bcast');
     refreshRoom();
   };
+
+  const sendAside = $('sendaside');
+  if (sendAside) sendAside.onclick = async () => {
+    const body = ($('asidebox').value || '').trim();
+    if (!body) return;
+    const r = await post('/api/broadcast', { room: selectedRoom, body, aside: asideWith });
+    if (r.status !== 'ok') return alert(r.message);
+    clearField('asidebox');
+    await loadAside();
+    refreshRoom();
+  };
+  const closeAside = $('closeaside');
+  if (closeAside) closeAside.onclick = () => { asideWith = null; asideData = null; roomSig = null; renderRoom(); };
+
+  document.querySelectorAll('[data-aside]').forEach((el) =>
+    el.onclick = async () => {
+      asideWith = el.dataset.aside;
+      await loadAside();
+      roomSig = null;
+      renderRoom();
+    });
 
   document.querySelectorAll('[data-assign2]').forEach((el) =>
     el.onchange = async () => {
@@ -633,7 +966,8 @@ function renderWiring() {
 
 function renderSetup() {
   if (!setup) return;
-  $('dbpath').textContent = setup.db_path;
+  const db = $('dbpath');
+  if (db) db.textContent = setup.db_path;
   $('setup').innerHTML = `
     <div>
       <h3>Claude Code — run this in each conversation's working directory</h3>
@@ -761,13 +1095,42 @@ async function refreshState() {
   renderSide();
 }
 
+async function loadAside() {
+  if (!asideWith || !selectedRoom) { asideData = null; return; }
+  asideData = await api(
+    '/api/aside?room=' + encodeURIComponent(selectedRoom) + '&name=' + encodeURIComponent(asideWith)
+  );
+}
+
 async function refreshRoom() {
   if (!selectedRoom) return renderRoom();
   roomData = await api('/api/room?name=' + encodeURIComponent(selectedRoom));
+  if (asideWith) await loadAside();
   renderRoom();
 }
 
-async function refreshAll() { await refreshState(); await refreshRoom(); }
+// The home view needs each room's discussion state, which the room endpoint
+// already computes — ask for it only while that view is actually showing.
+async function refreshHome() {
+  if (view !== 'home') return;
+  const rooms = {};
+  for (const r of state.rooms || []) {
+    try {
+      const d = await api('/api/room?name=' + encodeURIComponent(r.name));
+      rooms[r.name] = d.discussion || {};
+      if (d.autorun && d.autorun.turns) home.turns = Math.max(home.turns, d.autorun.turns);
+    } catch { /* room vanished mid-poll */ }
+  }
+  home.rooms = rooms;
+  renderHome();
+}
+
+async function refreshAll() {
+  await refreshState();
+  await refreshRoom();
+  await refreshHome();
+  renderRoster();
+}
 
 $('createroom').onclick = async () => {
   const name = ($('newroom').value || '').trim();
@@ -789,7 +1152,29 @@ $('browse').onclick = async () => {
   useFolder();
 };
 
+document.querySelectorAll('.navbtn').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
+
+$('restartapp').onclick = async () => {
+  if (!confirm('Restart Claude Boardroom now?')) return;
+  const r = await post('/api/restart', {});
+  if (r.status !== 'ok') return alert(r.message);
+  $('restartapp').textContent = 'Restarting…';
+};
+
+function deskLine() {
+  const nm = ($('deskname').value || 'research').trim() || 'research';
+  return `Register with the boardroom as "${nm}".`;
+}
+$('deskname').oninput = () => { $('deskline').textContent = deskLine(); };
+$('copydesk').onclick = async () => {
+  await navigator.clipboard.writeText(deskLine());
+  const t = $('copydesk').textContent;
+  $('copydesk').textContent = 'Copied';
+  setTimeout(() => ($('copydesk').textContent = t), 1200);
+};
+
 (async function init() {
+  $('deskline').textContent = deskLine();
   setup = await api('/api/setup');
   renderSetup();
   appInfo = await api('/api/app');
@@ -805,7 +1190,11 @@ $('browse').onclick = async () => {
     || localStorage.getItem('boardroom.base');
   if (base) { $('base').value = base; drafts.base = base; scan(); }
 
+  setView(view);
   await refreshAll();
+  const dbline = $('dbline');
+  if (dbline && setup) dbline.textContent = setup.db_path;
+
   setInterval(() => { if (!busy) refreshAll(); }, 2500);
   // Update and wiring state move on their own schedule — poll them gently.
   setInterval(async () => {
@@ -814,7 +1203,13 @@ $('browse').onclick = async () => {
     wiring = await api('/api/status');
     renderWiring();
   }, 10000);
-})();
+})().catch((err) => {
+  // A silent failure here leaves a blank page with no clue why.
+  document.body.insertAdjacentHTML('afterbegin',
+    '<div class="banner err" style="margin:12px">The page failed to start: ' +
+    esc(err && err.message ? err.message : String(err)) + '</div>');
+  console.error(err);
+});
 </script>
 </body>
 </html>

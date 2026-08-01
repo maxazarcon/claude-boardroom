@@ -84,6 +84,82 @@ function findClaudeBinary() {
 // it, since this string becomes a command-line argument.
 const SHELL_UNSAFE = /["'`$%&|<>^\\\r\n]/;
 
+// Runs the CLI in a folder with a fixed prompt. `resume` continues that
+// folder's most recent session; without it a brand new session starts.
+//
+// The prompt is never built from anything the user typed — names, roles and
+// discussion topics reach the session through the hook's injected context
+// instead, which keeps this command line free of anything a shell would
+// reinterpret.
+function runClaude({ folder, prompt, mode, resume }) {
+  if (!fs.existsSync(folder)) {
+    return Promise.resolve({ status: 'error', message: `folder does not exist: ${folder}` });
+  }
+  const bin = findClaudeBinary();
+  if (!bin) {
+    return Promise.resolve({
+      status: 'error',
+      message:
+        'Could not find the `claude` CLI. Put it on PATH or start the app with CLAUDE_BIN=/full/path/to/claude.',
+    });
+  }
+  if (SHELL_UNSAFE.test(prompt)) {
+    return Promise.resolve({ status: 'error', message: 'refusing to run: prompt contains shell metacharacters' });
+  }
+
+  const args = (resume ? ['-c'] : []).concat(['-p', prompt, '--permission-mode', mode]);
+
+  let file = bin;
+  let spawnArgs = args;
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(bin)) {
+    file = process.env.ComSpec || 'cmd.exe';
+    spawnArgs = ['/d', '/s', '/c', bin, ...args];
+  }
+
+  const started = Date.now();
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(file, spawnArgs, { cwd: folder, windowsHide: true });
+    } catch (err) {
+      return resolve({ status: 'error', message: `spawn failed: ${err.message}` });
+    }
+
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => child.kill(), 15 * 60 * 1000).unref?.() ?? null;
+
+    child.stdin.end();
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('error', (err) => resolve({ status: 'error', message: `spawn failed: ${err.message}` }));
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      const authRequired = code !== 0 && wiring.looksLikeAuthFailure(`${stdout}\n${stderr}`);
+      resolve({
+        status: authRequired ? 'auth_required' : code === 0 ? 'ok' : 'error',
+        folder_path: folder,
+        permission_mode: mode,
+        command: `${bin}${resume ? ' -c' : ''} -p "${prompt}" --permission-mode ${mode}`,
+        exit_code: code,
+        seconds: Math.round((Date.now() - started) / 1000),
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        message: authRequired
+          ? 'The Claude Code CLI is not signed in, so it could not run. This is a one-time login, separate from Claude Desktop.'
+          : undefined,
+      });
+    });
+  });
+}
+
+// A brand new session, told to find out who it is from the injected context.
+// Deliberately free of interpolation — the name and role come from the hook.
+const BOOTSTRAP_PROMPT =
+  'You have just been added to the Claude Boardroom. The boardroom context injected into this turn tells you the name you go by and the role you have been given. Call register with that name, this folder as cwd, and that role. Then, if you are already assigned to a room, read it with get_messages and introduce yourself in one short post_message saying how you read your role in light of what the room is already discussing. If you are still in the waiting room, just acknowledge and wait.';
+
 function beginTurn({ name }) {
   const p = core.participant(name);
   if (!p) return Promise.resolve({ status: 'unregistered', message: `no participant named "${name}"` });
@@ -110,7 +186,8 @@ function beginTurn({ name }) {
   }
 
   const status = core.discussionStatus({ name });
-  const turn = core.turnPrompt(status);
+  const addressed = p.room ? core.outstandingAddress({ room: p.room, name }) : null;
+  const turn = core.turnPrompt(status, { addressed: Boolean(addressed) });
   if (SHELL_UNSAFE.test(turn.prompt)) {
     return Promise.resolve({ status: 'error', message: 'refusing to run: turn prompt contains shell metacharacters' });
   }
@@ -452,6 +529,43 @@ function setProjectsDir({ base, enabled }) {
   };
 }
 
+// Start a brand new Claude Code session in a folder and seat it on the board
+// under a name and role of your choosing.
+async function createAgent({ folder, name, role, room, permission_mode }) {
+  if (!folder) return { status: 'error', message: 'folder is required' };
+  if (!name || !String(name).trim()) return { status: 'error', message: 'name is required' };
+  if (!fs.existsSync(folder)) return { status: 'error', message: `not found: ${folder}` };
+
+  const taken = core.participant(String(name).trim());
+  if (taken) {
+    return { status: 'error', message: `"${name}" is already on the board` };
+  }
+
+  // Seat it first, so the hook can tell the new session who it is and the
+  // moderator sees it in the roster even if the run is slow or fails.
+  const reg = core.register({ name: String(name).trim(), cwd: folder, role: role || null });
+  if (reg.status !== 'ok') return reg;
+  if (permission_mode) core.setPermissionMode({ name: reg.name, permission_mode });
+  if (room) core.assignRoom({ name: reg.name, room });
+
+  const mode = permission_mode || 'acceptEdits';
+  const run = await runClaude({ folder, prompt: BOOTSTRAP_PROMPT, mode, resume: false });
+
+  return {
+    ...run,
+    status: run.status,
+    name: reg.name,
+    role: role || null,
+    room: room || null,
+    seated: true,
+    message:
+      run.status === 'ok'
+        ? `${reg.name} is on the board${room ? ` in "${room}"` : ' in the waiting room'}.`
+        : run.message ||
+          `${reg.name} was added to the roster, but the first run did not complete. You can trigger it again with Begin Turn.`,
+  };
+}
+
 // Add one folder as a participant without waiting for a session to run there.
 // Useful for projects outside the auto-register base.
 function addProject({ folder }) {
@@ -561,10 +675,17 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, {
             status: 'ok',
             room,
-            participants: core.listParticipants({ room }).participants.map((p) => ({
-              ...p,
-              turn: core.turnPrompt(core.discussionStatus({ name: p.name })),
-            })),
+            participants: core.listParticipants({ room }).participants.map((p) => {
+              const addressed = core.outstandingAddress({ room, name: p.name });
+              return {
+                ...p,
+                addressed: Boolean(addressed),
+                turn: core.turnPrompt(core.discussionStatus({ name: p.name }), {
+                  addressed: Boolean(addressed),
+                }),
+                aside_count: core.asideMessages({ room, name: p.name }).length,
+              };
+            }),
             messages: core.roomMessages({ room }),
             discussion: core.discussionStatus({ room }),
             autorun: autorunState(),
@@ -576,6 +697,19 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, setupInfo());
         case '/api/status':
           return json(res, 200, require('../setup/install').status(RUNTIME));
+        case '/api/aside': {
+          const room = url.searchParams.get('room');
+          const who = url.searchParams.get('name');
+          if (!room || !who) {
+            return json(res, 400, { status: 'error', message: 'room and name are required' });
+          }
+          return json(res, 200, {
+            status: 'ok',
+            room,
+            name: who,
+            messages: core.asideMessages({ room, name: who }),
+          });
+        }
         case '/api/app':
           return json(res, 200, BRIDGE ? await BRIDGE.appInfo() : { status: 'ok', shell: false });
       }
@@ -616,6 +750,10 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, startAutorun(body));
         case '/api/autorun/stop':
           return json(res, 200, stopAutorun());
+        case '/api/create-agent':
+          return json(res, 200, await createAgent(body));
+        case '/api/role':
+          return json(res, 200, core.setRole(body));
 
         // Everything below needs the Electron shell.
         case '/api/pick-folder':
@@ -623,6 +761,7 @@ const server = http.createServer(async (req, res) => {
         case '/api/install-update':
         case '/api/auto-start':
         case '/api/open-login':
+        case '/api/restart':
         case '/api/rewire': {
           if (!BRIDGE) {
             return json(res, 200, {
@@ -636,6 +775,7 @@ const server = http.createServer(async (req, res) => {
             '/api/install-update': 'installUpdate',
             '/api/auto-start': 'setAutoStart',
             '/api/open-login': 'openLogin',
+            '/api/restart': 'restart',
             '/api/rewire': 'rewire',
           }[route];
           return json(res, 200, await BRIDGE[fn](body));

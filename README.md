@@ -478,9 +478,75 @@ CLAUDE_BIN="/full/path/to/claude" npm run ui
 
 ---
 
+## Roles, direct address, and private asides
+
+**Roles.** Every participant can carry a role — a sentence about what they own
+and what they should push back on. It is injected into their context on every
+turn, so they read the room as the person you hired rather than as a generic
+assistant. Set it in the Roster, or when creating an agent.
+
+The role is deliberately *not* turned into a mission statement by the app.
+Blending "what you are for" with "what this room is actually arguing about" is
+a judgement call, and the participant is better placed to make it than a
+template: it can see the full room history through the hook. So a new agent's
+first instruction is to introduce itself *in light of what the room is already
+discussing*, which is that blend, made by the one party with all the context.
+
+**Direct address.** The moderator box has a dropdown: send to the whole room, or
+address one participant. An addressed message is visible to everyone — the room
+watches the exchange — but only the addressee is asked to act on it. Their turn
+prompt changes to "the moderator addressed you directly, answer it", everyone
+else is told to read along and let them answer, and the address clears as soon
+as they say something.
+
+**Private asides.** Each participant has an **Aside** button: a private thread
+between them and the moderator. They see the room *and* their own aside; nobody
+else sees either side of it. A participant replies privately by calling
+`post_message` with `private: true`, which never advances a discussion turn.
+
+The visibility rule lives in a single SQL clause in `getMessages`, so there is
+one place to be wrong about it, and it is covered by tests that assert the other
+participants cannot read someone else's aside.
+
+## Adding agents
+
+**A brand new Claude Code session**, from the Roster: pick a folder, give it a
+name, a role, and optionally a room. The app seats it on the board first, then
+starts a *fresh* session in that folder (`claude -p`, no `-c`) whose only
+instruction is to find out who it is from the injected boardroom context and
+introduce itself. Nothing you type is ever interpolated into the command line.
+
+New agents default to `plan`, so a new hire cannot edit files until you decide
+otherwise.
+
+**A Claude Desktop conversation** needs no command line at all — the app has
+already written the MCP config. After a full restart of Desktop, say this in any
+Desktop chat:
+
+> Register with the boardroom as "research".
+
+The Setup view generates that line for a name of your choosing. Desktop
+conversations have no working directory, so they never get a Begin Turn button.
+
 ## The UI
 
-One page at `http://127.0.0.1:4737`:
+Four views, reachable from the header:
+
+- **Home** — rooms at a glance with their live discussion state, who is waiting,
+  wiring health, and roster size. The entry point rather than a dashboard for
+  its own sake: every card is a way into the thing it describes.
+- **Rooms** — the working view: participants, discussion, moderator box, asides,
+  message feed.
+- **Roster** — everyone on the board across all rooms, their roles and folders,
+  and where new agents are created. Roles and room assignment are here because
+  they are properties of a participant, not of whichever room you happen to be
+  looking at.
+- **Setup** — wiring health, projects folder, per-project actions, the Desktop
+  line, manual config, and a **Restart Claude Boardroom** button (also in the
+  tray menu) so picking up a config change costs one click instead of a trip to
+  the Start menu.
+
+The room page itself:
 
 - **Rooms** sidebar — create rooms, click one to open it
 - **Waiting room** — everyone registered but unassigned, with an assign dropdown

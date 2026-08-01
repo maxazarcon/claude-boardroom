@@ -23,14 +23,16 @@ function ensureRoom(room) {
   run('INSERT OR IGNORE INTO rooms (name, created_at) VALUES (?, ?)', room, now());
 }
 
-function insertMessage(room, sender, body, kind) {
+function insertMessage(room, sender, body, kind, opts = {}) {
   const info = run(
-    'INSERT INTO messages (room, sender, body, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO messages (room, sender, body, kind, created_at, addressed_to, aside_with) VALUES (?, ?, ?, ?, ?, ?, ?)',
     room,
     sender,
     body,
     kind,
-    now()
+    now(),
+    opts.addressed_to || null,
+    opts.aside_with || null
   );
   return Number(info.lastInsertRowid);
 }
@@ -69,7 +71,7 @@ function completedRounds(discussion) {
 
 /* -------------------------------------------------------------- registration */
 
-function register({ name, cwd }) {
+function register({ name, cwd, role }) {
   if (!name || !String(name).trim()) {
     return { status: 'error', message: 'name is required' };
   }
@@ -80,19 +82,21 @@ function register({ name, cwd }) {
   if (existing) {
     // Re-registering keeps the room assignment; it just refreshes the cwd.
     run(
-      'UPDATE participants SET last_seen = ?, folder_path = COALESCE(?, folder_path) WHERE name = ?',
+      'UPDATE participants SET last_seen = ?, folder_path = COALESCE(?, folder_path), role = COALESCE(?, role) WHERE name = ?',
       now(),
       folder,
+      role ? String(role) : null,
       name
     );
   } else {
     run(
-      'INSERT INTO participants (name, room, last_seen, folder_path, since_id, permission_mode, registered_at) VALUES (?, NULL, ?, ?, 0, ?, ?)',
+      'INSERT INTO participants (name, room, last_seen, folder_path, since_id, permission_mode, registered_at, role) VALUES (?, NULL, ?, ?, 0, ?, ?, ?)',
       name,
       now(),
       folder,
       'acceptEdits',
-      now()
+      now(),
+      role ? String(role) : null
     );
   }
 
@@ -143,7 +147,7 @@ function registerFolder({ folder }) {
 
 /* -------------------------------------------------------------------- posting */
 
-function postMessage({ name, body }) {
+function postMessage({ name, body, private: isPrivate }) {
   const p = participant(name);
   if (!p) {
     return {
@@ -157,6 +161,22 @@ function postMessage({ name, body }) {
   }
   if (body === undefined || body === null || !String(body).length) {
     return { status: 'error', message: 'body is required' };
+  }
+
+  // A private reply goes to this participant's aside with the moderator. It is
+  // never part of the room, so it also never advances the speaking order.
+  if (isPrivate) {
+    const id = insertMessage(p.room, p.name, String(body), 'participant', {
+      aside_with: p.name,
+    });
+    return {
+      status: 'ok',
+      id,
+      room: p.room,
+      private: true,
+      turn_advanced: false,
+      message: 'Sent privately to the moderator. Nobody else in the room can see it.',
+    };
   }
 
   const id = insertMessage(p.room, p.name, String(body), 'participant');
@@ -198,14 +218,74 @@ function postMessage({ name, body }) {
   };
 }
 
-function broadcast({ room, body }) {
+// `to` addresses one participant: everyone in the room sees the message, but
+// only the addressee is asked to act on it this turn.
+// `aside` puts it in the private channel with that participant instead, which
+// nobody else ever reads.
+function broadcast({ room, body, to, aside }) {
   if (!room) return { status: 'error', message: 'room is required' };
   if (!body || !String(body).length) {
     return { status: 'error', message: 'body is required' };
   }
+  const target = to || aside || null;
+  if (target) {
+    const p = participant(target);
+    if (!p) return { status: 'error', message: `no participant named "${target}"` };
+    if (p.room !== room) {
+      return { status: 'error', message: `${target} is not in "${room}"` };
+    }
+  }
+
   ensureRoom(room);
-  const id = insertMessage(room, 'moderator', String(body), 'moderator');
-  return { status: 'ok', id, room };
+  const id = insertMessage(room, 'moderator', String(body), 'moderator', {
+    addressed_to: aside ? null : to || null,
+    aside_with: aside || null,
+  });
+  return {
+    status: 'ok',
+    id,
+    room,
+    addressed_to: aside ? null : to || null,
+    aside_with: aside || null,
+  };
+}
+
+// The moderator's private thread with one participant, newest last.
+function asideMessages({ room, name, limit = 200 }) {
+  return all(
+    `SELECT id, room, sender, body, kind, created_at FROM (
+       SELECT * FROM messages WHERE room = ? AND aside_with = ? ORDER BY id DESC LIMIT ?
+     ) ORDER BY id`,
+    room,
+    name,
+    Number(limit)
+  );
+}
+
+// A direct address is outstanding until that participant says something after
+// it. Good enough, and it needs no extra bookkeeping to go stale.
+function outstandingAddress({ room, name }) {
+  const last = get(
+    `SELECT id, body FROM messages
+      WHERE room = ? AND addressed_to = ? ORDER BY id DESC LIMIT 1`,
+    room,
+    name
+  );
+  if (!last) return null;
+  const replied = get(
+    'SELECT id FROM messages WHERE room = ? AND sender = ? AND id > ? LIMIT 1',
+    room,
+    name,
+    last.id
+  );
+  return replied ? null : last;
+}
+
+function setRole({ name, role }) {
+  const p = participant(name);
+  if (!p) return { status: 'unregistered', message: `no participant named "${name}"` };
+  run('UPDATE participants SET role = ? WHERE name = ?', role ? String(role) : null, name);
+  return { status: 'ok', name, role: role || null };
 }
 
 /* -------------------------------------------------------------------- reading */
@@ -230,10 +310,17 @@ function getMessages({ name, since_id }) {
   const since =
     since_id === undefined || since_id === null ? Number(p.since_id) : Number(since_id);
 
+  // A participant reads the room, plus its own aside with the moderator, and
+  // never anyone else's aside. This is the only place that rule is enforced,
+  // so it stays in one query rather than being filtered after the fact.
   const rows = all(
-    'SELECT id, room, sender, body, kind, created_at FROM messages WHERE room = ? AND id > ? ORDER BY id',
+    `SELECT id, room, sender, body, kind, created_at, addressed_to, aside_with
+       FROM messages
+      WHERE room = ? AND id > ? AND (aside_with IS NULL OR aside_with = ?)
+      ORDER BY id`,
     p.room,
-    since
+    since,
+    p.name
   );
 
   if (rows.length) {
@@ -266,6 +353,7 @@ function listParticipants({ room } = {}) {
     participants: rows.map((p) => ({
       name: p.name,
       room: p.room,
+      role: p.role || null,
       last_seen: p.last_seen,
       folder_path: p.folder_path,
       permission_mode: p.permission_mode,
@@ -565,9 +653,12 @@ function castVote({ name, resolved }) {
 
 /* --------------------------------------------------------------- UI read model */
 
+// The room feed as everyone sees it — asides live in their own thread.
 function roomMessages({ room, limit = 200 }) {
   return all(
-    'SELECT id, room, sender, body, kind, created_at FROM (SELECT * FROM messages WHERE room = ? ORDER BY id DESC LIMIT ?) ORDER BY id',
+    `SELECT id, room, sender, body, kind, created_at, addressed_to FROM (
+       SELECT * FROM messages WHERE room = ? AND aside_with IS NULL ORDER BY id DESC LIMIT ?
+     ) ORDER BY id`,
     room,
     Number(limit)
   );
@@ -580,9 +671,21 @@ function roomMessages({ room, limit = 200 }) {
 // this string is passed as a command-line argument, and the moderator's own
 // discussion prompt is never interpolated into it (participants read that from
 // the room messages instead).
-function turnPrompt(status) {
+function turnPrompt(status, opts = {}) {
   const generic =
     'It is your turn in the Claude Boardroom. Check for new messages and respond or act as appropriate.';
+
+  // Being addressed by the moderator outranks the discussion state: it is a
+  // direct question, and the answer is what the turn is for.
+  if (opts.addressed) {
+    return {
+      label: 'Answer',
+      state: 'addressed',
+      prompt:
+        'The moderator addressed you directly in the Claude Boardroom. Read the room with get_messages to see what was asked, then answer it with post_message. The rest of the room can see the question and your answer, so answer as yourself, and keep to what was asked of you.',
+    };
+  }
+
   if (!status || !status.active || !status.you || !status.you.in_discussion) {
     return { label: 'Begin Turn', state: 'generic', prompt: generic };
   }
@@ -611,6 +714,9 @@ function turnPrompt(status) {
 module.exports = {
   register,
   registerFolder,
+  setRole,
+  asideMessages,
+  outstandingAddress,
   postMessage,
   getMessages,
   listParticipants,

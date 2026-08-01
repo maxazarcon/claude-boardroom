@@ -25,6 +25,7 @@ const TOOLS = [
       properties: {
         name: str('The name this session goes by in the boardroom.'),
         cwd: str('Optional. This session\'s working directory.'),
+        role: str('Optional. Your role on the board, in a sentence.'),
       },
       required: ['name'],
     },
@@ -39,6 +40,11 @@ const TOOLS = [
       properties: {
         name: str('Your own registered name.'),
         body: str('The message text.'),
+        private: {
+          type: 'boolean',
+          description:
+            'Send only to the moderator, in your private aside, instead of to the room. Use this only when replying to something the moderator said privately. A private message never advances a discussion turn.',
+        },
       },
       required: ['name', 'body'],
     },
@@ -89,10 +95,15 @@ const TOOLS = [
   {
     name: 'broadcast',
     description:
-      'Post a message into a room as "moderator" rather than as a participant. Intended for the moderator UI, not for sessions.',
+      'Post a message into a room as "moderator" rather than as a participant. Optionally address one participant, or send it privately as an aside. Intended for the moderator UI, not for sessions.',
     inputSchema: {
       type: 'object',
-      properties: { room: str('Room name.'), body: str('The message text.') },
+      properties: {
+        room: str('Room name.'),
+        body: str('The message text.'),
+        to: str('Optional. Address one participant: everyone sees it, only they are asked to act.'),
+        aside: str('Optional. Send privately to this participant instead; nobody else ever reads it.'),
+      },
       required: ['room', 'body'],
     },
     handler: core.broadcast,
